@@ -323,6 +323,7 @@ def audible_to_result(p, existing_requests):
 
     already_have = ll_already_have(p.get("title", ""), author_name, "audiobook") in ("Open", "Have")
     req_status = existing_requests.get(asin)
+    is_preorder = release_date != "0000" and release_date > datetime.utcnow().strftime("%Y-%m-%d")
 
     return {
         "source_id": asin,
@@ -335,6 +336,7 @@ def audible_to_result(p, existing_requests):
         "release_date": release_date,
         "already_have": already_have,
         "request_status": req_status,
+        "is_preorder": is_preorder,
     }
 
 
@@ -436,6 +438,71 @@ def search(q: str, book_type: str = "audiobook"):
 
     results.sort(key=sort_key, reverse=True)
     return results
+
+
+# Audible's top-level browse categories (US marketplace) - static because this
+# taxonomy barely changes, not worth a live API call on every page load.
+AUDIBLE_GENRES = [
+    ("18571910011", "Arts & Entertainment"),
+    ("18571951011", "Biographies & Memoirs"),
+    ("18572029011", "Business & Careers"),
+    ("18572091011", "Children's Audiobooks"),
+    ("24427740011", "Comedy & Humor"),
+    ("18573211011", "Computers & Technology"),
+    ("18573267011", "Education & Learning"),
+    ("18573518011", "History"),
+    ("18574426011", "Literature & Fiction"),
+    ("18574597011", "Mystery, Thriller & Suspense"),
+    ("18574784011", "Relationships, Parenting & Personal Development"),
+    ("18574839011", "Religion & Spirituality"),
+    ("18580518011", "Romance"),
+    ("18580540011", "Science & Engineering"),
+    ("18580606011", "Science Fiction & Fantasy"),
+    ("18580648011", "Sports & Outdoors"),
+    ("18580715011", "Teen & Young Adult"),
+    ("18581095011", "Travel & Tourism"),
+]
+
+
+@app.get("/api/genres")
+def get_genres():
+    return [{"id": gid, "name": name} for gid, name in AUDIBLE_GENRES]
+
+
+@app.get("/api/new-releases")
+def new_releases(category_id: str = ""):
+    conn_local = get_local_db()
+    try:
+        existing_requests = {
+            r["source_id"]: r["status"]
+            for r in conn_local.execute("SELECT source_id, status FROM requests WHERE book_type='audiobook'")
+        }
+    finally:
+        conn_local.close()
+
+    # Popular categories (esp. Sci-Fi/Fantasy) have a deep backlog of far-future
+    # pre-orders - sorted by -ReleaseDate, the newest 50 results can be entirely
+    # months away, so filtering to "already released" isn't practical without
+    # paginating dozens of pages. Showing pre-orders alongside real releases is
+    # fine here: the card already surfaces release_date, and requesting one just
+    # means LazyLibrarian grabs it automatically once it's actually out.
+    params = {
+        "num_results": 24,
+        "response_groups": "product_desc,media,contributors",
+        "marketplace": "US",
+        "products_sort_by": "-ReleaseDate",
+    }
+    if category_id:
+        params["category_id"] = category_id
+    try:
+        r = requests.get(AUDIBLE_API, params=params, timeout=15)
+        r.raise_for_status()
+        products = r.json().get("products", [])
+    except Exception as e:
+        logger.warning(f"Audible new-releases fetch failed: {e}")
+        products = []
+
+    return [audible_to_result(p, existing_requests) for p in products]
 
 
 @app.post("/api/request")

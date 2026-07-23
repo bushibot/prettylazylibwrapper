@@ -21,6 +21,26 @@ app = FastAPI()
 
 _detail_cache: dict[str, tuple[float, dict]] = {}
 
+HEALTH_CACHE_TTL = 120  # seconds - a real connectivity check on every poll would
+                        # itself look like scraping traffic against the site
+_health_cache: dict = {"status": "unknown", "checked_at": None, "detail": ""}
+
+
+def check_abb_health() -> dict:
+    """Cached, so the frontend can poll this often without adding real load
+    against the site itself."""
+    now = time.time()
+    if _health_cache["checked_at"] and now - _health_cache["checked_at"] < HEALTH_CACHE_TTL:
+        return _health_cache
+    try:
+        r = requests.get(cfg.ABB_BASE + "/", headers=HEADERS, timeout=10)
+        r.raise_for_status()
+        _health_cache.update(status="ok", detail="")
+    except Exception as e:
+        _health_cache.update(status="down", detail=str(e))
+    _health_cache["checked_at"] = now
+    return _health_cache
+
 
 def fetch(url: str) -> tuple[str, str]:
     """Returns (html, final_url) - final_url lets callers detect when ABB
@@ -281,4 +301,11 @@ def api(
 
 @app.get("/health")
 def health():
+    """Reports this bridge's own liveness, not the upstream site - use
+    /source-status for whether audiobookbay.lu itself is reachable."""
     return {"status": "ok"}
+
+
+@app.get("/source-status")
+def source_status():
+    return check_abb_health()
