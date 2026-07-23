@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>prettylazylibwrapper</Name>
+  <Repository>ghcr.io/bushibot/prettylazylibwrapper:latest</Repository>
+  <Registry>https://github.com/bushibot/prettylazylibwrapper</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/bushibot/prettylazylibwrapper/issues</Support>
+  <Project>https://github.com/bushibot/prettylazylibwrapper</Project>
+  <Overview>Family-friendly frontend for LazyLibrarian - search Audible/GoodReads for clean results and covers, request with one click, tracks status (Wanted/Snatched/Downloaded) per requester. Includes a built-in AudioBookBay Torznab indexer bridge. Requires LazyLibrarian; recommended alongside Audiobookshelf. LAN/Tailscale use only - no authentication.</Overview>
+  <Category>MediaApp:Other</Category>
+  <WebUI>http://[IP]:[PORT:80]/</WebUI>
+  <Icon/>
+  <ExtraParams/>
+  <PostArgs/>
+  <CPUset/>
+  <DateInstalled/>
+  <Requires>LazyLibrarian must already be running and reachable, with an API key generated.</Requires>
+  <Config Name="WebUI Port" Target="80" Default="80" Mode="tcp" Description="" Type="Port" Display="always" Required="true" Mask="false">80</Config>
+  <Config Name="Data Path" Target="/data" Default="" Mode="rw" Description="Local request-tracking + settings database" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/prettylazylibwrapper</Config>
+  <Config Name="LazyLibrarian DB" Target="/ll-db/lazylibrarian.db" Default="" Mode="rw" Description="Shared read-write access to LazyLibrarian's database, needed to mark books Wanted" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/lazylibrarian/lazylibrarian.db</Config>
+  <Config Name="LL_URL" Target="LL_URL" Default="" Mode="" Description="LazyLibrarian's base URL, e.g. http://192.168.1.x:5299" Type="Variable" Display="always" Required="true" Mask="false"></Config>
+  <Config Name="LL_API_KEY" Target="LL_API_KEY" Default="" Mode="" Description="From LazyLibrarian's Settings -> Web Interface" Type="Variable" Display="always" Required="true" Mask="true"></Config>
+  <Config Name="LL_DB_PATH" Target="LL_DB_PATH" Default="/ll-db/lazylibrarian.db" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="false">/ll-db/lazylibrarian.db</Config>
+  <Config Name="USERS" Target="USERS" Default="" Mode="" Description="Comma-separated household user names - can also be set later from /config" Type="Variable" Display="always" Required="false" Mask="false"></Config>
+  <Config Name="QBIT_URL" Target="QBIT_URL" Default="" Mode="" Description="Optional - enables live download progress tracking" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="QBIT_USER" Target="QBIT_USER" Default="admin" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="false">admin</Config>
+  <Config Name="QBIT_PASS" Target="QBIT_PASS" Default="" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="SAB_URL" Target="SAB_URL" Default="" Mode="" Description="Optional, alternative/additional to qBittorrent" Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="SAB_API_KEY" Target="SAB_API_KEY" Default="" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="ABB_BASE" Target="ABB_BASE" Default="https://audiobookbay.lu" Mode="" Description="Base URL for the built-in AudioBookBay Torznab bridge" Type="Variable" Display="advanced" Required="false" Mask="false">https://audiobookbay.lu</Config>
+  <Config Name="BRIDGE_API_KEY" Target="BRIDGE_API_KEY" Default="" Mode="" Description="Set a key here and use the same value when adding this as a Torznab indexer in Prowlarr (path: /abb/api)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+</Container>

@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Config — PrettyLazyLibWrapper</title>
+<style>
+  :root {
+    --bg: #131720;
+    --bg-card: #1c212e;
+    --border: #2a3140;
+    --text: #e8ecf3;
+    --text-dim: #8b93a7;
+    --accent: #5b8def;
+    --amber: #d29922;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px;
+  }
+  header a { color: var(--text-dim); text-decoration: none; font-size: 0.9rem; }
+  header a:hover { color: var(--text); }
+  .logo { font-weight: 700; font-size: 1.2rem; }
+  .logo span { color: var(--accent); }
+  main { max-width: 640px; margin: 0 auto; padding: 24px 20px 60px; }
+  .banner {
+    background: rgba(210,153,34,0.12); border: 1px solid var(--amber); color: var(--amber);
+    padding: 12px 14px; border-radius: 8px; font-size: 0.85rem; margin-bottom: 26px; line-height: 1.5;
+  }
+  .group { margin-bottom: 28px; }
+  .group h2 {
+    font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim);
+    margin: 0 0 14px;
+  }
+  label { display: block; font-size: 0.9rem; margin-bottom: 6px; color: var(--text); }
+  label .hint { display: block; color: var(--text-dim); font-size: 0.78rem; font-weight: 400; margin-top: 2px; }
+  .field { margin-bottom: 16px; }
+  input[type=text], input[type=password] {
+    width: 100%; background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+    padding: 10px 12px; border-radius: 8px; font-size: 0.9rem;
+  }
+  input:focus { outline: 1px solid var(--accent); }
+  button {
+    background: var(--accent); color: white; border: none; padding: 12px 22px;
+    border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+  }
+  button:active { opacity: 0.8; }
+  #save-status { margin-left: 12px; color: var(--text-dim); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Pretty<span>LazyLib</span>Wrapper</div>
+  <a href="/">&larr; Back to app</a>
+</header>
+
+<main>
+  <div class="banner">
+    This page has no login - anyone who can reach this app on your network can
+    change these settings. Built for a trusted LAN/Tailscale setup, not for
+    exposing directly to the internet.
+  </div>
+
+  <div class="group">
+    <h2>Household</h2>
+    <div class="field">
+      <label for="f-USERS">Users
+        <span class="hint">Comma-separated names shown in the reader picker and request tags.</span>
+      </label>
+      <input type="text" id="f-USERS" placeholder="e.g. Alex, Sam, Jordan">
+    </div>
+  </div>
+
+  <div id="fields"></div>
+
+  <button id="save-btn">Save</button>
+  <span id="save-status"></span>
+</main>
+
+<script>
+const FIELD_ORDER = [
+  ["LazyLibrarian", ["LL_URL", "LL_API_KEY"]],
+  ["qBittorrent", ["QBIT_URL", "QBIT_USER", "QBIT_PASS"]],
+  ["SABnzbd (optional)", ["SAB_URL", "SAB_API_KEY"]],
+  ["AudioBookBay bridge", ["ABB_BASE", "BRIDGE_API_KEY"]],
+];
+
+let settingsMeta = {};
+
+async function load() {
+  settingsMeta = await fetch("/api/settings").then(r => r.json());
+  document.getElementById("f-USERS").value = settingsMeta.USERS.value || "";
+
+  const container = document.getElementById("fields");
+  container.innerHTML = FIELD_ORDER.map(([groupLabel, keys]) => `
+    <div class="group">
+      <h2>${groupLabel}</h2>
+      ${keys.map(k => {
+        const meta = settingsMeta[k] || {};
+        const type = meta.secret ? "password" : "text";
+        return `
+          <div class="field">
+            <label for="f-${k}">${meta.label || k}</label>
+            <input type="${type}" id="f-${k}" value="${(meta.value || "").replace(/"/g, "&quot;")}"
+                   placeholder="${meta.secret && meta.set ? "unchanged" : ""}">
+          </div>`;
+      }).join("")}
+    </div>
+  `).join("");
+}
+
+document.getElementById("save-btn").addEventListener("click", async () => {
+  const values = { USERS: document.getElementById("f-USERS").value };
+  for (const [, keys] of FIELD_ORDER) {
+    for (const k of keys) {
+      values[k] = document.getElementById(`f-${k}`).value;
+    }
+  }
+  const statusEl = document.getElementById("save-status");
+  statusEl.textContent = "Saving...";
+  const res = await fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values }),
+  });
+  statusEl.textContent = res.ok ? "Saved" : "Failed to save";
+  if (res.ok) load();
+  setTimeout(() => { statusEl.textContent = ""; }, 3000);
+});
+
+load();
+</script>
+
+</body>
+</html>

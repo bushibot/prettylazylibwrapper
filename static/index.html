@@ -1,0 +1,460 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PrettyLazyLibWrapper</title>
+<style>
+  :root {
+    --bg: #131720;
+    --bg-card: #1c212e;
+    --bg-card-hover: #232939;
+    --border: #2a3140;
+    --text: #e8ecf3;
+    --text-dim: #8b93a7;
+    --accent: #5b8def;
+    --green: #3fb950;
+    --amber: #d29922;
+    --purple: #a371f7;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    background: rgba(19,23,32,0.95);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 20px;
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .logo { font-weight: 700; font-size: 1.3rem; letter-spacing: -0.02em; margin-right: 8px; white-space: nowrap; }
+  .logo span { color: var(--accent); }
+  nav { display: flex; gap: 4px; }
+  nav button {
+    background: none; border: none; color: var(--text-dim); font-size: 0.95rem;
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  }
+  nav button.active { background: var(--bg-card); color: var(--text); }
+  .spacer { flex: 1; }
+  select, input[type=text] {
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+    padding: 9px 12px; border-radius: 8px; font-size: 0.9rem;
+  }
+  select:focus, input:focus { outline: 1px solid var(--accent); }
+  main { max-width: 1400px; margin: 0 auto; padding: 20px; }
+  .search-row { display: flex; gap: 10px; margin-bottom: 22px; flex-wrap: wrap; }
+  .search-row input[type=text] { flex: 1; min-width: 220px; font-size: 1rem; padding: 12px 16px; }
+  .type-toggle { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .type-toggle button {
+    background: var(--bg-card); border: none; color: var(--text-dim); padding: 0 18px;
+    cursor: pointer; font-size: 0.9rem;
+  }
+  .type-toggle button.active { background: var(--accent); color: white; }
+  .section-title {
+    font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim);
+    margin: 28px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 18px;
+  }
+  .card {
+    background: var(--bg-card); border-radius: 10px; overflow: hidden;
+    border: 1px solid var(--border); transition: transform .12s, background .12s;
+    display: flex; flex-direction: column;
+  }
+  .card:hover { background: var(--bg-card-hover); transform: translateY(-2px); }
+  .cover-wrap { position: relative; aspect-ratio: 2/3; background: #0d0f14; }
+  .cover-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .cover-wrap .noimg {
+    width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-size: 0.75rem; text-align: center; padding: 10px;
+  }
+  .badge {
+    position: absolute; top: 8px; right: 8px; font-size: 0.68rem; font-weight: 600;
+    padding: 3px 8px; border-radius: 20px; color: white; text-transform: uppercase; letter-spacing: 0.03em;
+  }
+  .badge.have { background: var(--green); }
+  .badge.submitted { background: var(--text-dim); }
+  .badge.unresolved { background: var(--red); }
+  .badge.wanted { background: var(--amber); }
+  .badge.snatched { background: var(--purple); }
+  .badge.downloaded { background: var(--green); }
+  .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
+  .card-title { font-size: 0.85rem; font-weight: 600; line-height: 1.25; }
+  .card-author { font-size: 0.78rem; color: var(--text-dim); }
+  .card-date { font-size: 0.72rem; color: var(--text-dim); margin-top: auto; padding-top: 6px; }
+  .req-btn {
+    margin-top: 8px; width: 100%; padding: 8px; border-radius: 6px; border: none;
+    background: var(--accent); color: white; font-size: 0.8rem; font-weight: 600; cursor: pointer;
+  }
+  .req-btn:hover { filter: brightness(1.1); }
+  .req-btn:disabled { background: var(--border); color: var(--text-dim); cursor: default; }
+  .req-btn.working { display: flex; align-items: center; justify-content: center; gap: 6px; }
+  .spinner {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.35); border-top-color: white;
+    animation: spin 0.7s linear infinite; display: inline-block;
+  }
+  .req-btn:disabled .spinner { border-color: rgba(139,147,167,0.35); border-top-color: var(--text-dim); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .empty { color: var(--text-dim); padding: 40px 0; text-align: center; }
+  .loading { color: var(--text-dim); padding: 30px 0; text-align: center; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
+  th { color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
+  td.status-cell span { padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 600; color: white; text-transform: capitalize; }
+  .thumb-cell img { width: 36px; height: 54px; object-fit: cover; border-radius: 3px; vertical-align: middle; }
+  .progress-wrap { display: flex; align-items: center; gap: 8px; min-width: 140px; }
+  .progress-track {
+    flex: 1; height: 8px; border-radius: 20px; background: var(--bg); border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .progress-fill { height: 100%; border-radius: 20px; transition: width 0.4s ease; }
+  .progress-fill.downloading { background: var(--green); }
+  .progress-fill.slow { background: var(--amber); }
+  .progress-fill.stalled { background: #e8813f; }
+  .progress-fill.broken { background: var(--red); }
+  .progress-fill.sending { background: var(--accent); }
+  .progress-fill.done { background: var(--green); }
+  .progress-pct { font-size: 0.7rem; color: var(--text-dim); min-width: 30px; text-align: right; }
+  .health-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 5px; flex-shrink: 0; }
+  .health-dot.downloading, .health-dot.done { background: var(--green); }
+  .health-dot.slow { background: var(--amber); }
+  .health-dot.stalled { background: #e8813f; }
+  .health-dot.broken { background: var(--red); }
+  .health-dot.sending { background: var(--accent); }
+  .requester-pill {
+    display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 0.72rem;
+    background: var(--bg-card); border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
+    display: flex; align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 24px; max-width: 380px; width: 100%;
+  }
+  .modal h3 { margin: 0 0 4px; font-size: 1.1rem; }
+  .modal .modal-book { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 18px; }
+  .modal-users { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+  .modal-users button {
+    padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+    color: var(--text); font-size: 0.95rem; font-weight: 600; cursor: pointer;
+  }
+  .modal-users button:hover { background: var(--accent); border-color: var(--accent); }
+  .modal-cancel {
+    width: 100%; padding: 10px; border-radius: 8px; border: none; background: none;
+    color: var(--text-dim); font-size: 0.85rem; cursor: pointer;
+  }
+  .modal-cancel:hover { color: var(--text); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Pretty<span>LazyLib</span>Wrapper</div>
+  <nav>
+    <button id="nav-search" class="active">Search</button>
+    <button id="nav-mine">Requests</button>
+  </nav>
+  <div class="spacer"></div>
+  <a href="/config" title="Settings"
+     style="color:var(--text-dim);font-size:0.9rem;text-decoration:none;padding:8px 10px;border-radius:8px"
+     onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">&#9881;</a>
+  <a href="https://book.walkerpad.com" target="_blank" rel="noopener"
+     style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius:8px;white-space:nowrap"
+     onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Open Audiobookshelf</a>
+  <a href="https://apps.apple.com/us/app/audiobooth-audiobooks-player/id6753017503" target="_blank" rel="noopener"
+     style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius:8px;white-space:nowrap"
+     onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Get the App</a>
+  <label style="color:var(--text-dim);font-size:0.8rem">Select Reader:</label>
+  <select id="user-picker"></select>
+</header>
+
+<div id="request-modal-overlay" class="modal-overlay" style="display:none">
+  <div class="modal">
+    <h3>Who's this for?</h3>
+    <div class="modal-book" id="modal-book-title"></div>
+    <div class="modal-users" id="modal-users"></div>
+    <button class="modal-cancel" id="modal-cancel">Cancel</button>
+  </div>
+</div>
+
+<main>
+  <div id="view-search">
+    <div class="search-row">
+      <input type="text" id="q" placeholder="Search for a book or author...">
+      <div class="type-toggle">
+        <button id="type-audiobook" class="active" data-type="audiobook">Audiobook</button>
+        <button id="type-ebook" data-type="ebook">eBook</button>
+      </div>
+    </div>
+    <div id="results"></div>
+  </div>
+
+  <div id="view-mine" style="display:none">
+    <div id="mine-table"></div>
+  </div>
+</main>
+
+<script>
+const API = "";
+let currentType = "audiobook";
+let viewFilter = "All";
+let allUsers = [];
+let searchTimer = null;
+let pendingRequestItem = null;
+
+async function loadUsers() {
+  allUsers = await fetch(API + "/api/users").then(r => r.json());
+  const sel = document.getElementById("user-picker");
+  sel.innerHTML = `<option value="All">All</option><option value="Everyone">Everyone</option>` + allUsers.map(u => `<option value="${u}">${u}</option>`).join("");
+  // deliberately no saved/remembered default - this is a shared device, always starts
+  // on "All" so nobody's requests get silently filtered out of view by accident
+  sel.value = "All";
+  viewFilter = "All";
+  sel.addEventListener("change", () => {
+    viewFilter = sel.value;
+    if (document.getElementById("view-mine").style.display !== "none") loadMine();
+  });
+}
+
+function statusLabel(s) {
+  if (!s) return "";
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function coverImg(cover, title) {
+  if (cover) {
+    return `<img src="${cover}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=noimg>${title.replace(/</g,'')}</div>'">`;
+  }
+  return `<div class="noimg">${title.replace(/</g,'')}</div>`;
+}
+
+function renderCard(item) {
+  const badge = item.already_have
+    ? `<div class="badge have">In Library</div>`
+    : (item.request_status ? `<div class="badge ${item.request_status}">${statusLabel(item.request_status)}</div>` : "");
+
+  let btn;
+  if (item.already_have) {
+    btn = `<button class="req-btn" disabled>Already Have</button>`;
+  } else if (item.request_status) {
+    btn = `<button class="req-btn" disabled>${statusLabel(item.request_status)}</button>`;
+  } else {
+    btn = `<button class="req-btn" onclick='openRequestModal(${JSON.stringify(item).replace(/'/g, "&apos;")})'>Request</button>`;
+  }
+
+  return `
+    <div class="card" data-source-id="${item.source_id}">
+      <div class="cover-wrap">${coverImg(item.cover, item.title)}${badge}</div>
+      <div class="card-body">
+        <div class="card-title">${item.title}${item.subtitle ? `<div style="font-weight:400;color:var(--text-dim);font-size:0.75rem;margin-top:2px">${item.subtitle}</div>` : ""}</div>
+        <div class="card-author">${item.author}${item.narrator ? ` &middot; read by ${item.narrator}` : ""}</div>
+        <div class="card-date">${item.release_date && item.release_date !== "0000" ? item.release_date : "Release date unknown"}</div>
+        ${btn}
+      </div>
+    </div>`;
+}
+
+async function runSearch() {
+  const q = document.getElementById("q").value.trim();
+  const resultsEl = document.getElementById("results");
+  if (!q) { resultsEl.innerHTML = ""; return; }
+  resultsEl.innerHTML = `<div class="loading">Searching...</div>`;
+  let items;
+  try {
+    items = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&book_type=${currentType}`).then(r => r.json());
+  } catch (e) {
+    resultsEl.innerHTML = `<div class="empty">Search failed - is BookRequest able to reach LazyLibrarian?</div>`;
+    return;
+  }
+  if (!items.length) {
+    resultsEl.innerHTML = `<div class="empty">No results.</div>`;
+    return;
+  }
+  const have = items.filter(i => i.already_have);
+  const avail = items.filter(i => !i.already_have);
+  let html = "";
+  if (avail.length) {
+    html += `<div class="section-title">Available to request</div><div class="grid">${avail.map(renderCard).join("")}</div>`;
+  }
+  if (have.length) {
+    html += `<div class="section-title">Already in your library</div><div class="grid">${have.map(renderCard).join("")}</div>`;
+  }
+  resultsEl.innerHTML = html;
+}
+
+function openRequestModal(item) {
+  pendingRequestItem = item;
+  document.getElementById("modal-book-title").textContent = `${item.title} — ${item.author}`;
+  document.getElementById("modal-users").innerHTML =
+    `<button style="grid-column:1/-1;font-weight:600" onclick="submitRequest('Everyone')">Everyone</button>` +
+    allUsers.map(u =>
+      `<button onclick="submitRequest('${u.replace(/'/g, "\\'")}')">${u}</button>`
+    ).join("");
+  document.getElementById("request-modal-overlay").style.display = "flex";
+}
+
+function closeRequestModal() {
+  pendingRequestItem = null;
+  document.getElementById("request-modal-overlay").style.display = "none";
+}
+
+async function submitRequest(requester) {
+  const item = pendingRequestItem;
+  if (!item) return;
+  closeRequestModal();
+
+  // instant feedback - update the button right away, don't wait on the network
+  const card = document.querySelector(`.card[data-source-id="${CSS.escape(item.source_id)}"]`);
+  let btn = card ? card.querySelector(".req-btn") : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add("working");
+    btn.innerHTML = `<span class="spinner"></span> Requesting...`;
+  }
+
+  const body = {
+    requester,
+    book_type: currentType,
+    source_id: item.source_id,
+    authorid: item.authorid,
+    title: item.title,
+    author: item.author,
+    cover: item.cover,
+    release_date: item.release_date,
+  };
+  try {
+    const r = await fetch(`${API}/api/request`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const result = await r.json();
+    if (!result.resolved) {
+      alert(`Requested for ${requester}, but LazyLibrarian couldn't find a matching catalog entry for "${item.title}" yet - it's saved and flagged, but won't auto-download until that's sorted out.`);
+    }
+    runSearch();
+  } catch (e) {
+    alert("Request failed: " + e.message);
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove("working");
+      btn.textContent = "Request";
+    }
+  }
+}
+
+document.getElementById("modal-cancel").addEventListener("click", closeRequestModal);
+document.getElementById("request-modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "request-modal-overlay") closeRequestModal();
+});
+
+function healthLabel(h) {
+  return {
+    sending: "Waiting for a source",
+    downloading: "Downloading",
+    slow: "Downloading (slow)",
+    stalled: "Stalled",
+    broken: "Broken",
+    done: "Done",
+  }[h] || "";
+}
+
+function renderProgress(r) {
+  if (r.status === "downloaded") {
+    return `<span style="color:var(--text-dim);font-size:0.8rem">&#10003; Complete</span>`;
+  }
+  if (r.status === "unresolved" || r.status === "submitted") {
+    return `<span style="color:var(--text-dim);font-size:0.8rem">Not started</span>`;
+  }
+  const health = r.download_health || "sending";
+  const pct = Math.max(0, Math.min(100, r.progress_pct || 0));
+  return `
+    <div class="progress-wrap" title="${healthLabel(health)}">
+      <span class="health-dot ${health}"></span>
+      <div class="progress-track"><div class="progress-fill ${health}" style="width:${pct}%"></div></div>
+      <span class="progress-pct">${pct > 0 ? pct.toFixed(0) + "%" : ""}</span>
+    </div>`;
+}
+
+async function loadMine() {
+  const el = document.getElementById("mine-table");
+  el.innerHTML = `<div class="loading">Loading...</div>`;
+  const url = viewFilter === "All"
+    ? `${API}/api/all-requests`
+    : `${API}/api/my-requests?requester=${encodeURIComponent(viewFilter)}`;
+  const rows = await fetch(url).then(r => r.json());
+  if (!rows.length) {
+    el.innerHTML = `<div class="empty">${viewFilter === "All" ? "No requests yet." : viewFilter + " hasn't requested anything yet."}</div>`;
+    return;
+  }
+  const showRequester = viewFilter === "All";
+  el.innerHTML = `
+    <table>
+      <thead><tr><th></th><th>Title</th><th>Author</th><th>Type</th>${showRequester ? "<th>Requested by</th>" : ""}<th>Requested</th><th>Status</th><th>Progress</th></tr></thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td class="thumb-cell">${r.cover_url ? `<img src="${r.cover_url}">` : ""}</td>
+            <td>${r.title}</td>
+            <td>${r.author}</td>
+            <td>${r.book_type === "audiobook" ? "Audiobook" : "eBook"}</td>
+            ${showRequester ? `<td><span class="requester-pill">${r.requester}</span></td>` : ""}
+            <td>${new Date(r.created_at).toLocaleDateString()}</td>
+            <td class="status-cell"><span class="badge ${r.status}">${statusLabel(r.status)}</span></td>
+            <td>${renderProgress(r)}</td>
+          </tr>`).join("")}
+      </tbody>
+    </table>`;
+}
+
+document.getElementById("q").addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(runSearch, 450);
+});
+
+document.querySelectorAll(".type-toggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".type-toggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentType = btn.dataset.type;
+    runSearch();
+  });
+});
+
+let mineRefreshTimer = null;
+
+document.getElementById("nav-search").addEventListener("click", () => {
+  document.getElementById("nav-search").classList.add("active");
+  document.getElementById("nav-mine").classList.remove("active");
+  document.getElementById("view-search").style.display = "block";
+  document.getElementById("view-mine").style.display = "none";
+  clearInterval(mineRefreshTimer);
+});
+document.getElementById("nav-mine").addEventListener("click", () => {
+  document.getElementById("nav-mine").classList.add("active");
+  document.getElementById("nav-search").classList.remove("active");
+  document.getElementById("view-search").style.display = "none";
+  document.getElementById("view-mine").style.display = "block";
+  loadMine();
+  clearInterval(mineRefreshTimer);
+  mineRefreshTimer = setInterval(loadMine, 30000);  // matches backend poll cadence closely enough to feel live
+});
+
+loadUsers();
+</script>
+</body>
+</html>
