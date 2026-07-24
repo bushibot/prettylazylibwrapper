@@ -92,9 +92,12 @@ the initial value on first boot.
 
 Some ISPs block `audiobookbay.lu` outright at the network level (confirmed:
 Comcast in the US) - the connection just silently times out, no error page.
-If that's happening to you, point `ABB_PROXY_URL` at an HTTP proxy that exits
-through a country that isn't blocked (Germany and France both tested clean;
-Canada and the Netherlands did not). A small [gluetun](https://github.com/qdm12/gluetun)
+This looks to be ISP-specific, not a country-wide block: a US-based VPN exit
+on a different network (a VPN provider's own datacenter, not a residential
+ISP) reached the site fine, and with much better latency than routing
+overseas - try that before assuming you need a different country. Point
+`ABB_PROXY_URL` at an HTTP proxy on whatever exit actually works for you. A
+small [gluetun](https://github.com/qdm12/gluetun)
 sidecar with `HTTPPROXY=on` works well for this and doesn't need to touch any
 other container's networking.
 
