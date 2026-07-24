@@ -1,5 +1,6 @@
 import re
 import time
+import random
 import logging
 import threading
 import urllib.parse
@@ -62,11 +63,16 @@ def _throttle():
     spacing. A single LL search can fan out into several detail-page fetches,
     and LL's cron searches every wanted book in one pass - without this,
     a household with a handful of wanted books can burst dozens of requests
-    within seconds, which reads as bot/abuse traffic to ABB's own protection."""
+    within seconds, which reads as bot/abuse traffic to ABB's own protection.
+
+    A perfectly exact interval every time is itself a bot signature real
+    traffic never has, so jitter is added on top - never subtracted, since
+    the whole point is guaranteeing a floor, not averaging one."""
     global _last_request_at
     with _rate_lock:
         min_interval = float(cfg.ABB_MIN_REQUEST_INTERVAL or 3)
-        wait = _last_request_at + min_interval - time.time()
+        jitter = random.uniform(0, min_interval * 0.5)
+        wait = _last_request_at + min_interval + jitter - time.time()
         if wait > 0:
             time.sleep(wait)
         _last_request_at = time.time()
