@@ -1,6 +1,7 @@
 import re
 import time
 import logging
+import threading
 import urllib.parse
 from datetime import datetime, timezone
 
@@ -41,6 +42,7 @@ def check_abb_health() -> dict:
     if _health_cache["checked_at"] and now - _health_cache["checked_at"] < HEALTH_CACHE_TTL:
         return _health_cache
     try:
+        _throttle()
         r = requests.get(cfg.ABB_BASE + "/", headers=HEADERS, timeout=10, proxies=_proxies())
         r.raise_for_status()
         _health_cache.update(status="ok", detail="")
@@ -50,9 +52,30 @@ def check_abb_health() -> dict:
     return _health_cache
 
 
+_rate_lock = threading.Lock()
+_last_request_at = 0.0
+
+
+def _throttle():
+    """Every outbound request to ABB funnels through fetch() (search pages
+    and detail pages alike), so this is the one place that needs to enforce
+    spacing. A single LL search can fan out into several detail-page fetches,
+    and LL's cron searches every wanted book in one pass - without this,
+    a household with a handful of wanted books can burst dozens of requests
+    within seconds, which reads as bot/abuse traffic to ABB's own protection."""
+    global _last_request_at
+    with _rate_lock:
+        min_interval = float(cfg.ABB_MIN_REQUEST_INTERVAL or 3)
+        wait = _last_request_at + min_interval - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_at = time.time()
+
+
 def fetch(url: str) -> tuple[str, str]:
     """Returns (html, final_url) - final_url lets callers detect when ABB
     silently redirected a search away from the results page."""
+    _throttle()
     r = requests.get(url, headers=HEADERS, timeout=20, proxies=_proxies())
     r.raise_for_status()
     return r.text, r.url

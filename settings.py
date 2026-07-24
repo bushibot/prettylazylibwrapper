@@ -18,6 +18,7 @@ SETTING_FIELDS = [
     ("BRIDGE_API_KEY", "AudioBookBay bridge API key (also set this in Prowlarr's indexer)", True, ""),
     ("ABB_PROXY_URL", "HTTP proxy for reaching AudioBookBay (e.g. http://host:port) - some ISPs block it directly, leave blank to connect direct", False, ""),
     ("NYT_API_KEY", "NYT Books API key, used for the ebook New Releases browse (developer.nytimes.com)", True, ""),
+    ("ABB_MIN_REQUEST_INTERVAL", "Minimum seconds between requests to AudioBookBay - a single LL search can trigger several (one per result, for detail pages), and a 15-min cron pass searches every wanted book, so bursts add up fast. Raise this if you keep getting rate-limited/blocked.", False, "3"),
 ]
 
 
