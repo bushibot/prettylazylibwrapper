@@ -26,6 +26,14 @@ HEALTH_CACHE_TTL = 120  # seconds - a real connectivity check on every poll woul
 _health_cache: dict = {"status": "unknown", "checked_at": None, "detail": ""}
 
 
+def _proxies():
+    """Some ISPs (confirmed: Comcast) silently block audiobookbay.lu outright -
+    routing through an HTTP proxy (e.g. a VPN sidecar) works around that. Empty
+    setting means connect direct, same as before this existed."""
+    url = cfg.ABB_PROXY_URL
+    return {"http": url, "https": url} if url else None
+
+
 def check_abb_health() -> dict:
     """Cached, so the frontend can poll this often without adding real load
     against the site itself."""
@@ -33,7 +41,7 @@ def check_abb_health() -> dict:
     if _health_cache["checked_at"] and now - _health_cache["checked_at"] < HEALTH_CACHE_TTL:
         return _health_cache
     try:
-        r = requests.get(cfg.ABB_BASE + "/", headers=HEADERS, timeout=10)
+        r = requests.get(cfg.ABB_BASE + "/", headers=HEADERS, timeout=10, proxies=_proxies())
         r.raise_for_status()
         _health_cache.update(status="ok", detail="")
     except Exception as e:
@@ -45,7 +53,7 @@ def check_abb_health() -> dict:
 def fetch(url: str) -> tuple[str, str]:
     """Returns (html, final_url) - final_url lets callers detect when ABB
     silently redirected a search away from the results page."""
-    r = requests.get(url, headers=HEADERS, timeout=20)
+    r = requests.get(url, headers=HEADERS, timeout=20, proxies=_proxies())
     r.raise_for_status()
     return r.text, r.url
 

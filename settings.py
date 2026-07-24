@@ -16,6 +16,7 @@ SETTING_FIELDS = [
     ("SAB_API_KEY", "SABnzbd API key (optional)", True, ""),
     ("ABB_BASE", "AudioBookBay base URL, used by the built-in indexer bridge", False, "https://audiobookbay.lu"),
     ("BRIDGE_API_KEY", "AudioBookBay bridge API key (also set this in Prowlarr's indexer)", True, ""),
+    ("ABB_PROXY_URL", "HTTP proxy for reaching AudioBookBay (e.g. http://host:port) - some ISPs block it directly, leave blank to connect direct", False, ""),
 ]
 
 
