@@ -4,7 +4,7 @@ import sqlite3
 import time
 import threading
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
@@ -480,17 +480,16 @@ def new_releases(category_id: str = ""):
     finally:
         conn_local.close()
 
-    # Popular categories (esp. Sci-Fi/Fantasy) have a deep backlog of far-future
-    # pre-orders - sorted by -ReleaseDate, the newest 50 results can be entirely
-    # months away, so filtering to "already released" isn't practical without
-    # paginating dozens of pages. Showing pre-orders alongside real releases is
-    # fine here: the card already surfaces release_date, and requesting one just
-    # means LazyLibrarian grabs it automatically once it's actually out.
+    # Popular categories have a deep backlog of far-future pre-orders - sorted
+    # by -ReleaseDate, even 200 results in can be entirely months away, so
+    # filtering to "recently released" isn't practical with that sort. Sorting
+    # by Relevance instead gives a genuine mix of already-out and upcoming
+    # titles in a single page, which we then split into two buckets.
     params = {
-        "num_results": 24,
+        "num_results": 50,
         "response_groups": "product_desc,media,contributors",
         "marketplace": "US",
-        "products_sort_by": "-ReleaseDate",
+        "products_sort_by": "Relevance",
     }
     if category_id:
         params["category_id"] = category_id
@@ -502,7 +501,19 @@ def new_releases(category_id: str = ""):
         logger.warning(f"Audible new-releases fetch failed: {e}")
         products = []
 
-    return [audible_to_result(p, existing_requests) for p in products]
+    results = [audible_to_result(p, existing_requests) for p in products]
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    month_ago = (datetime.utcnow() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+    released = sorted(
+        (r for r in results if r["release_date"] != "0000" and month_ago <= r["release_date"] <= today),
+        key=lambda r: r["release_date"], reverse=True,
+    )
+    preorder = sorted(
+        (r for r in results if r["release_date"] > today),
+        key=lambda r: r["release_date"],
+    )
+    return {"new": released[:18], "preorder": preorder[:18]}
 
 
 @app.post("/api/request")

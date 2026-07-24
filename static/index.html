@@ -205,10 +205,13 @@
     <div id="results"></div>
     <div id="discover">
       <div class="section-title" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
-        <span>New &amp; upcoming</span>
+        <span>Browse</span>
         <select id="genre-picker" style="text-transform:none;letter-spacing:normal;font-size:0.85rem"></select>
       </div>
-      <div id="discover-grid" class="grid"><div class="loading">Loading...</div></div>
+      <div class="section-title">New releases</div>
+      <div id="discover-grid-new" class="grid"><div class="loading">Loading...</div></div>
+      <div class="section-title">Pre-orders</div>
+      <div id="discover-grid-preorder" class="grid"><div class="loading">Loading...</div></div>
     </div>
   </div>
 
@@ -322,18 +325,23 @@ async function loadGenres() {
 }
 
 async function loadDiscover() {
-  const gridEl = document.getElementById("discover-grid");
+  const newEl = document.getElementById("discover-grid-new");
+  const preorderEl = document.getElementById("discover-grid-preorder");
   const categoryId = document.getElementById("genre-picker").value;
-  gridEl.innerHTML = `<div class="loading">Loading...</div>`;
-  let items;
+  newEl.innerHTML = `<div class="loading">Loading...</div>`;
+  preorderEl.innerHTML = `<div class="loading">Loading...</div>`;
+  let data;
   try {
-    items = await fetch(`${API}/api/new-releases?category_id=${encodeURIComponent(categoryId)}`).then(r => r.json());
-    if (!Array.isArray(items)) throw new Error("bad response");
+    data = await fetch(`${API}/api/new-releases?category_id=${encodeURIComponent(categoryId)}`).then(r => r.json());
+    if (!data || !Array.isArray(data.new) || !Array.isArray(data.preorder)) throw new Error("bad response");
   } catch (e) {
-    gridEl.innerHTML = `<div class="empty">Couldn't load new releases from Audible right now.</div>`;
+    const msg = `<div class="empty">Couldn't load from Audible right now.</div>`;
+    newEl.innerHTML = msg;
+    preorderEl.innerHTML = msg;
     return;
   }
-  gridEl.innerHTML = items.length ? items.map(renderCard).join("") : `<div class="empty">No results for this genre.</div>`;
+  newEl.innerHTML = data.new.length ? data.new.map(renderCard).join("") : `<div class="empty">Nothing released in the last month for this genre.</div>`;
+  preorderEl.innerHTML = data.preorder.length ? data.preorder.map(renderCard).join("") : `<div class="empty">No upcoming pre-orders found.</div>`;
 }
 
 function openRequestModal(item) {
