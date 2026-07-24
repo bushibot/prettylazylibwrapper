@@ -386,6 +386,10 @@ class RequestIn(BaseModel):
     author: str
     cover: Optional[str] = None
     release_date: Optional[str] = None
+    # True for ebook cards whose source_id isn't already a GoodReads/LL
+    # bookid (e.g. NYT discovery results, which only give us an ISBN) - tells
+    # create_request to resolve by title/author instead of trusting source_id
+    needs_resolution: bool = False
 
 
 @app.on_event("startup")
@@ -516,6 +520,117 @@ def new_releases(category_id: str = ""):
     return {"new": released[:18], "preorder": preorder[:18]}
 
 
+# ---------- ebook discovery (NYT bestseller lists) ----------
+# Unlike Audible, everything on a bestseller list is by definition already
+# published - no pre-order pollution, no date filtering needed. Lists refresh
+# weekly on NYT's end, so a cheap in-memory cache avoids hitting their (free,
+# 1000/day) quota on every page load.
+
+NYT_API = "https://api.nytimes.com/svc/books/v3/lists/overview.json"
+_nyt_cache = {"data": None, "fetched_at": 0}
+NYT_CACHE_TTL = 3600
+
+# NYT splits its lists into print/ebook ones and 4 dedicated audio ones - each
+# side only makes sense for the matching book_type (ISBNs on the audio lists
+# are for the print edition, not the actual audiobook).
+NYT_AUDIO_LISTS = {
+    "Audio Advice, How-To & Misc", "Audio Children's", "Audio Fiction", "Audio Nonfiction",
+}
+
+
+def _nyt_overview():
+    now = time.time()
+    if _nyt_cache["data"] and now - _nyt_cache["fetched_at"] < NYT_CACHE_TTL:
+        return _nyt_cache["data"]
+    r = requests.get(NYT_API, params={"api-key": cfg.NYT_API_KEY}, timeout=15)
+    r.raise_for_status()
+    lists = r.json().get("results", {}).get("lists", [])
+    _nyt_cache.update(data=lists, fetched_at=now)
+    return lists
+
+
+def nyt_book_to_result(b, existing_requests, book_type):
+    isbn = b.get("primary_isbn13", "")
+    already_have = ll_already_have(b.get("title", ""), b.get("author", ""), book_type) in ("Open", "Have")
+    return {
+        "source_id": isbn,
+        "authorid": None,
+        "title": (b.get("title") or "").title(),
+        "subtitle": b.get("description"),
+        "author": b.get("author", ""),
+        "narrator": None,
+        "cover": b.get("book_image"),
+        "release_date": None,
+        "already_have": already_have,
+        "request_status": existing_requests.get(isbn),
+        "needs_resolution": True,
+    }
+
+
+def _nyt_existing(book_type):
+    conn_local = get_local_db()
+    try:
+        return {
+            r["source_id"]: r["status"]
+            for r in conn_local.execute("SELECT source_id, status FROM requests WHERE book_type=?", (book_type,))
+        }
+    finally:
+        conn_local.close()
+
+
+@app.get("/api/ebook-genres")
+def get_ebook_genres():
+    try:
+        lists = _nyt_overview()
+    except Exception as e:
+        logger.warning(f"NYT lists fetch failed: {e}")
+        return []
+    return [l["list_name"] for l in lists if l["list_name"] not in NYT_AUDIO_LISTS]
+
+
+@app.get("/api/ebook-discover")
+def ebook_discover(list_name: str = ""):
+    existing_requests = _nyt_existing("ebook")
+    try:
+        lists = _nyt_overview()
+    except Exception as e:
+        logger.warning(f"NYT lists fetch failed: {e}")
+        return []
+
+    lists = [l for l in lists if l["list_name"] not in NYT_AUDIO_LISTS]
+    if list_name:
+        lists = [l for l in lists if l["list_name"] == list_name]
+    else:
+        lists = lists[:1]  # default view: just the flagship Combined Fiction list
+
+    books = [b for l in lists for b in l.get("books", [])]
+    return [nyt_book_to_result(b, existing_requests, "ebook") for b in books]
+
+
+@app.get("/api/audiobook-bestsellers")
+def audiobook_bestsellers():
+    """NYT's 4 audio lists, combined - unlike the Audible-sourced New/Pre-order
+    rows, everything here is guaranteed already published and real, so it's a
+    clean complement rather than a replacement."""
+    existing_requests = _nyt_existing("audiobook")
+    try:
+        lists = _nyt_overview()
+    except Exception as e:
+        logger.warning(f"NYT lists fetch failed: {e}")
+        return []
+
+    lists = [l for l in lists if l["list_name"] in NYT_AUDIO_LISTS]
+    seen = set()
+    books = []
+    for l in lists:
+        for b in l.get("books", []):
+            isbn = b.get("primary_isbn13", "")
+            if isbn and isbn not in seen:
+                seen.add(isbn)
+                books.append(b)
+    return [nyt_book_to_result(b, existing_requests, "audiobook") for b in books[:18]]
+
+
 @app.post("/api/request")
 def create_request(req: RequestIn):
     if req.requester not in get_users() and req.requester != EVERYONE_TAG:
@@ -525,7 +640,7 @@ def create_request(req: RequestIn):
 
     now = datetime.utcnow().isoformat()
 
-    if req.book_type == "audiobook":
+    if req.book_type == "audiobook" or req.needs_resolution:
         ll_bookid, ll_authorid = resolve_goodreads_bookid(req.title, req.author)
     else:
         ll_bookid, ll_authorid = req.source_id, req.authorid

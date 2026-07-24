@@ -21,6 +21,10 @@ AudioBookBay Torznab indexer bridge, in one container.
 - **AudioBookBay bridge** (`/abb/api`): AudioBookBay has no real API, so this
   scrapes it and exposes a Torznab-compatible endpoint that Prowlarr (or
   LazyLibrarian directly) can query like any other indexer.
+- **Discovery browsing**: a genre-filterable New Releases / Pre-orders wall for
+  audiobooks (Audible), plus a NYT bestsellers row for both audiobooks and
+  ebooks (optional - needs a free NYT API key). Click straight through to
+  request anything you see.
 - **Settings screen** (`/config`): everything is configurable from the web UI
   after first boot, no need to recreate the container to change credentials.
 
@@ -84,6 +88,7 @@ rather not bake secrets into your compose file.
 | `ABB_BASE` | no | Defaults to `https://audiobookbay.lu` |
 | `BRIDGE_API_KEY` | no | Set this and use the same value in Prowlarr's indexer config |
 | `ABB_PROXY_URL` | no | HTTP proxy for reaching AudioBookBay, e.g. `http://host:port` - see below |
+| `NYT_API_KEY` | no | Powers the ebook New Releases browse and the audiobook Bestsellers row - see below |
 
 All of the above can also be set later from `/config` — env vars only seed
 the initial value on first boot.
@@ -100,6 +105,23 @@ overseas - try that before assuming you need a different country. Point
 small [gluetun](https://github.com/qdm12/gluetun)
 sidecar with `HTTPPROXY=on` works well for this and doesn't need to touch any
 other container's networking.
+
+### Setting up the NYT API key
+
+The ebook New Releases browse and the audiobook Bestsellers row both use the
+NYT Books API. This was picked deliberately over the alternatives - GoodReads'
+public API has been dead since 2020, and both Google Books and Open Library's
+"sort by newest" turned out to be unreliable (mostly old reissues and, in
+Open Library's case, outright bogus dates). A bestseller list can't contain
+an unpublished book by definition, so NYT's data needed no extra filtering to
+be genuinely current.
+
+1. Register a free account at `developer.nytimes.com`
+2. Go to **My Apps** → create a new app → enable **Books API** for it
+3. Copy the generated key into `NYT_API_KEY` (env var or `/config`)
+
+Free tier is 1,000 requests/day; this app caches responses for an hour
+server-side, so normal use won't come close to that.
 
 ## License
 

@@ -31,4 +31,6 @@
   <Config Name="SAB_API_KEY" Target="SAB_API_KEY" Default="" Mode="" Description="" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
   <Config Name="ABB_BASE" Target="ABB_BASE" Default="https://audiobookbay.lu" Mode="" Description="Base URL for the built-in AudioBookBay Torznab bridge" Type="Variable" Display="advanced" Required="false" Mask="false">https://audiobookbay.lu</Config>
   <Config Name="BRIDGE_API_KEY" Target="BRIDGE_API_KEY" Default="" Mode="" Description="Set a key here and use the same value when adding this as a Torznab indexer in Prowlarr (path: /abb/api)" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
+  <Config Name="ABB_PROXY_URL" Target="ABB_PROXY_URL" Default="" Mode="" Description="Optional HTTP proxy for reaching AudioBookBay - some ISPs (confirmed: Comcast) block it directly. See README for the VPN sidecar workaround." Type="Variable" Display="advanced" Required="false" Mask="false"></Config>
+  <Config Name="NYT_API_KEY" Target="NYT_API_KEY" Default="" Mode="" Description="Optional - powers the ebook New Releases browse and audiobook Bestsellers row. Free key from developer.nytimes.com" Type="Variable" Display="advanced" Required="false" Mask="true"></Config>
 </Container>

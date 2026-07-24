@@ -66,6 +66,13 @@
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 18px;
   }
+  @media (min-width: 1050px) {
+    /* auto-fill floats to however many 160px columns fit (7 on a typical
+       desktop), which leaves an odd short row for fixed-count sections like
+       New Releases/Pre-orders. Lock to 6 columns once there's room for it -
+       still fluid below this width, same as before, for mobile/tablet. */
+    .grid { grid-template-columns: repeat(6, 1fr); }
+  }
   .card {
     background: var(--bg-card); border-radius: 10px; overflow: hidden;
     border: 1px solid var(--border); transition: transform .12s, background .12s;
@@ -212,6 +219,15 @@
       <div id="discover-grid-new" class="grid"><div class="loading">Loading...</div></div>
       <div class="section-title">Pre-orders</div>
       <div id="discover-grid-preorder" class="grid"><div class="loading">Loading...</div></div>
+      <div class="section-title">Bestsellers (NYT)</div>
+      <div id="discover-grid-bestsellers" class="grid"><div class="loading">Loading...</div></div>
+    </div>
+    <div id="discover-ebook" style="display:none">
+      <div class="section-title" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
+        <span>Browse (NYT bestsellers)</span>
+        <select id="ebook-genre-picker" style="text-transform:none;letter-spacing:normal;font-size:0.85rem"></select>
+      </div>
+      <div id="discover-grid-ebook" class="grid"><div class="loading">Loading...</div></div>
     </div>
   </div>
 
@@ -281,9 +297,17 @@ function renderCard(item) {
     </div>`;
 }
 
+let ebookDiscoverLoaded = false;
+
 function updateDiscoverVisibility(searchActive) {
-  const discoverEl = document.getElementById("discover");
-  discoverEl.style.display = (!searchActive && currentType === "audiobook") ? "block" : "none";
+  const show = !searchActive;
+  document.getElementById("discover").style.display = (show && currentType === "audiobook") ? "block" : "none";
+  document.getElementById("discover-ebook").style.display = (show && currentType === "ebook") ? "block" : "none";
+  if (show && currentType === "ebook" && !ebookDiscoverLoaded) {
+    ebookDiscoverLoaded = true;
+    loadEbookGenres();
+    loadEbookDiscover();
+  }
 }
 
 async function runSearch() {
@@ -342,6 +366,43 @@ async function loadDiscover() {
   }
   newEl.innerHTML = data.new.length ? data.new.map(renderCard).join("") : `<div class="empty">Nothing released in the last month for this genre.</div>`;
   preorderEl.innerHTML = data.preorder.length ? data.preorder.map(renderCard).join("") : `<div class="empty">No upcoming pre-orders found.</div>`;
+
+  const bestEl = document.getElementById("discover-grid-bestsellers");
+  bestEl.innerHTML = `<div class="loading">Loading...</div>`;
+  try {
+    const items = await fetch(`${API}/api/audiobook-bestsellers`).then(r => r.json());
+    if (!Array.isArray(items)) throw new Error("bad response");
+    bestEl.innerHTML = items.length ? items.map(renderCard).join("") : `<div class="empty">No bestseller data available.</div>`;
+  } catch (e) {
+    bestEl.innerHTML = `<div class="empty">Couldn't load NYT bestsellers right now.</div>`;
+  }
+}
+
+async function loadEbookGenres() {
+  let genres;
+  try {
+    genres = await fetch(`${API}/api/ebook-genres`).then(r => r.json());
+    if (!Array.isArray(genres)) throw new Error("bad response");
+  } catch (e) {
+    return;
+  }
+  const sel = document.getElementById("ebook-genre-picker");
+  sel.innerHTML = genres.map(g => `<option value="${g}">${g}</option>`).join("");
+}
+
+async function loadEbookDiscover() {
+  const gridEl = document.getElementById("discover-grid-ebook");
+  const listName = document.getElementById("ebook-genre-picker").value;
+  gridEl.innerHTML = `<div class="loading">Loading...</div>`;
+  let items;
+  try {
+    items = await fetch(`${API}/api/ebook-discover?list_name=${encodeURIComponent(listName)}`).then(r => r.json());
+    if (!Array.isArray(items)) throw new Error("bad response");
+  } catch (e) {
+    gridEl.innerHTML = `<div class="empty">Couldn't load NYT bestsellers right now.</div>`;
+    return;
+  }
+  gridEl.innerHTML = items.length ? items.map(renderCard).join("") : `<div class="empty">No results for this list.</div>`;
 }
 
 function openRequestModal(item) {
@@ -401,6 +462,9 @@ async function submitRequest(requester) {
     runSearch();
     if (document.getElementById("discover").style.display !== "none") {
       loadDiscover();
+    }
+    if (document.getElementById("discover-ebook").style.display !== "none") {
+      loadEbookDiscover();
     }
   } catch (e) {
     alert("Request failed: " + e.message);
@@ -510,6 +574,7 @@ document.getElementById("nav-mine").addEventListener("click", () => {
 });
 
 document.getElementById("genre-picker").addEventListener("change", loadDiscover);
+document.getElementById("ebook-genre-picker").addEventListener("change", loadEbookDiscover);
 
 loadUsers();
 loadGenres();
