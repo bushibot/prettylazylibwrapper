@@ -205,7 +205,7 @@
     <div id="results"></div>
     <div id="discover">
       <div class="section-title" style="display:flex;align-items:center;gap:10px;justify-content:space-between">
-        <span>New releases</span>
+        <span>New &amp; upcoming</span>
         <select id="genre-picker" style="text-transform:none;letter-spacing:normal;font-size:0.85rem"></select>
       </div>
       <div id="discover-grid" class="grid"><div class="loading">Loading...</div></div>
@@ -387,7 +387,13 @@ async function submitRequest(requester) {
     if (!result.resolved) {
       alert(`Requested for ${requester}, but LazyLibrarian couldn't find a matching catalog entry for "${item.title}" yet - it's saved and flagged, but won't auto-download until that's sorted out.`);
     }
+    // the card could be in the search results or the New Releases grid (or
+    // both, briefly) - refresh whichever are actually visible so the button
+    // doesn't stay stuck on "Requesting..." when it came from the grid
     runSearch();
+    if (document.getElementById("discover").style.display !== "none") {
+      loadDiscover();
+    }
   } catch (e) {
     alert("Request failed: " + e.message);
     if (btn) {
