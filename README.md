@@ -83,9 +83,20 @@ rather not bake secrets into your compose file.
 | `SAB_URL` / `SAB_API_KEY` | no | Alternative/additional to qBittorrent |
 | `ABB_BASE` | no | Defaults to `https://audiobookbay.lu` |
 | `BRIDGE_API_KEY` | no | Set this and use the same value in Prowlarr's indexer config |
+| `ABB_PROXY_URL` | no | HTTP proxy for reaching AudioBookBay, e.g. `http://host:port` - see below |
 
 All of the above can also be set later from `/config` — env vars only seed
 the initial value on first boot.
+
+### If AudioBookBay searches are timing out
+
+Some ISPs block `audiobookbay.lu` outright at the network level (confirmed:
+Comcast in the US) - the connection just silently times out, no error page.
+If that's happening to you, point `ABB_PROXY_URL` at an HTTP proxy that exits
+through a country that isn't blocked (Germany and France both tested clean;
+Canada and the Netherlands did not). A small [gluetun](https://github.com/qdm12/gluetun)
+sidecar with `HTTPPROXY=on` works well for this and doesn't need to touch any
+other container's networking.
 
 ## License
 
