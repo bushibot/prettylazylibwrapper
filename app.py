@@ -296,7 +296,7 @@ def match_download_health(title, author, book_type, qbit_torrents, sab_queue, sa
 def audible_search(keywords=None, title=None, author=None, num_results=24):
     params = {
         "num_results": num_results,
-        "response_groups": "product_desc,media",
+        "response_groups": "product_desc,media,product_extended_attrs",
         "marketplace": "US",
     }
     if keywords:
@@ -328,6 +328,7 @@ def audible_to_result(p, existing_requests):
     return {
         "source_id": asin,
         "authorid": None,
+        "language": (p.get("language") or "").strip().lower(),
         "title": p.get("title", ""),
         "subtitle": p.get("subtitle"),
         "author": author_name,
@@ -351,6 +352,7 @@ def goodreads_to_result(item, existing_requests):
     return {
         "source_id": bookid,
         "authorid": item.get("authorid"),
+        "language": (item.get("booklang") or "").strip().lower(),
         "title": item.get("bookname", ""),
         "subtitle": None,
         "author": item.get("authorname", ""),
@@ -405,8 +407,39 @@ def list_users():
     return get_users()
 
 
+# Audible/GoodReads return editions in every language for a keyword search, and
+# there is no working server-side filter (language=english is ignored; locale=
+# returns nothing). So we filter here. "unknown" is always kept - a lot of
+# GoodReads records have no booklang and dropping them hides good results.
+LANG_ALIASES = {
+    "english": {"english", "eng", "en", "en-us", "en-gb", "en_us", "en_gb"},
+    "spanish": {"spanish", "spa", "es", "espanol", "espa\u00f1ol"},
+    "german":  {"german", "ger", "deu", "de"},
+    "french":  {"french", "fre", "fra", "fr"},
+    "italian": {"italian", "ita", "it"},
+    "japanese": {"japanese", "jpn", "ja"},
+}
+
+def matches_language(value, wanted):
+    """wanted='all' passes everything; unknown/blank always passes."""
+    if wanted in ("", "all"):
+        return True
+    v = (value or "").strip().lower()
+    if not v or v in ("unknown", "none", "null"):
+        return True
+    return v in LANG_ALIASES.get(wanted, {wanted})
+
+
+@app.get("/api/languages")
+def languages():
+    """Selector options for the UI."""
+    return [{"value": "all", "label": "All languages"}] + [
+        {"value": k, "label": k.capitalize()} for k in sorted(LANG_ALIASES)
+    ]
+
+
 @app.get("/api/search")
-def search(q: str, book_type: str = "audiobook"):
+def search(q: str, book_type: str = "audiobook", language: str = "english"):
     if not q.strip():
         return []
 
@@ -435,6 +468,12 @@ def search(q: str, book_type: str = "audiobook"):
             seen.add(r["source_id"])
             deduped.append(r)
         results = deduped
+
+    wanted = (language or "english").strip().lower()
+    before = len(results)
+    results = [r for r in results if matches_language(r.get("language"), wanted)]
+    if before != len(results):
+        logger.info(f"language filter '{wanted}': {before} -> {len(results)} results for {q!r}")
 
     def sort_key(r):
         d = r["release_date"] or "0000"
