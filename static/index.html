@@ -265,9 +265,13 @@ function statusLabel(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+function coverProxyUrl(cover) {
+  return `${API}/api/cover?u=${encodeURIComponent(cover)}`;
+}
+
 function coverImg(cover, title) {
   if (cover) {
-    return `<img src="${cover}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=noimg>${title.replace(/</g,'')}</div>'">`;
+    return `<img src="${coverProxyUrl(cover)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=noimg>${title.replace(/</g,'')}</div>'">`;
   }
   return `<div class="noimg">${title.replace(/</g,'')}</div>`;
 }
@@ -530,7 +534,7 @@ async function loadMine() {
       <tbody>
         ${rows.map(r => `
           <tr>
-            <td class="thumb-cell">${r.cover_url ? `<img src="${r.cover_url}">` : ""}</td>
+            <td class="thumb-cell">${r.cover_url ? `<img src="${coverProxyUrl(r.cover_url)}">` : ""}</td>
             <td>${r.title}</td>
             <td>${r.author}</td>
             <td>${r.book_type === "audiobook" ? "Audiobook" : "eBook"}</td>
