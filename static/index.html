@@ -185,6 +185,8 @@
   <a href="https://apps.apple.com/us/app/audiobooth-audiobooks-player/id6753017503" target="_blank" rel="noopener"
      style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius:8px;white-space:nowrap"
      onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Get the App</a>
+  <label style="color:var(--text-dim);font-size:0.8rem">Language:</label>
+  <select id="lang-picker" title="Filter search results by language"></select>
   <label style="color:var(--text-dim);font-size:0.8rem">Select Reader:</label>
   <select id="user-picker"></select>
 </header>
@@ -263,9 +265,13 @@ function statusLabel(s) {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+function coverProxyUrl(cover) {
+  return `${API}/api/cover?u=${encodeURIComponent(cover)}`;
+}
+
 function coverImg(cover, title) {
   if (cover) {
-    return `<img src="${cover}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=noimg>${title.replace(/</g,'')}</div>'">`;
+    return `<img src="${coverProxyUrl(cover)}" alt="" loading="lazy" onerror="this.parentElement.innerHTML='<div class=noimg>${title.replace(/</g,'')}</div>'">`;
   }
   return `<div class="noimg">${title.replace(/</g,'')}</div>`;
 }
@@ -318,7 +324,8 @@ async function runSearch() {
   resultsEl.innerHTML = `<div class="loading">Searching...</div>`;
   let items;
   try {
-    items = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&book_type=${currentType}`).then(r => r.json());
+    const lang = (document.getElementById("lang-picker") || {}).value || "english";
+    items = await fetch(`${API}/api/search?q=${encodeURIComponent(q)}&book_type=${currentType}&language=${encodeURIComponent(lang)}`).then(r => r.json());
     if (!Array.isArray(items)) throw new Error("bad response");
   } catch (e) {
     const source = currentType === "audiobook" ? "Audible" : "LazyLibrarian";
@@ -527,7 +534,7 @@ async function loadMine() {
       <tbody>
         ${rows.map(r => `
           <tr>
-            <td class="thumb-cell">${r.cover_url ? `<img src="${r.cover_url}">` : ""}</td>
+            <td class="thumb-cell">${r.cover_url ? `<img src="${coverProxyUrl(r.cover_url)}">` : ""}</td>
             <td>${r.title}</td>
             <td>${r.author}</td>
             <td>${r.book_type === "audiobook" ? "Audiobook" : "eBook"}</td>
@@ -597,6 +604,25 @@ async function checkSourceStatus() {
 }
 checkSourceStatus();
 setInterval(checkSourceStatus, 120000);
+</script>
+<script>
+// Language filter: defaults to English (Audible/GoodReads return every edition
+// for a keyword search and have no usable server-side filter). Choice persists.
+(async function initLangPicker(){
+  const sel = document.getElementById("lang-picker");
+  if (!sel) return;
+  let opts = [{value:"all",label:"All languages"},{value:"english",label:"English"}];
+  try {
+    const r = await fetch(`${API}/api/languages`);
+    if (r.ok) { const j = await r.json(); if (Array.isArray(j) && j.length) opts = j; }
+  } catch (e) { /* fall back to the built-in list */ }
+  sel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join("");
+  sel.value = localStorage.getItem("plw_language") || "english";
+  sel.addEventListener("change", () => {
+    localStorage.setItem("plw_language", sel.value);
+    if (typeof runSearch === "function") runSearch();
+  });
+})();
 </script>
 </body>
 </html>

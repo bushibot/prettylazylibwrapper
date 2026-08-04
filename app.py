@@ -1,15 +1,20 @@
+import hashlib
+import ipaddress
 import os
 import re
+import socket
 import sqlite3
 import time
 import threading
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from settings import (
@@ -23,6 +28,7 @@ logger = logging.getLogger("prettylazylibwrapper")
 
 LL_DB_PATH = os.environ.get("LL_DB_PATH", "/ll-db/lazylibrarian.db")  # mounted read-write
 LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/data/prettylazylibwrapper.db")
+COVER_CACHE_DIR = os.environ.get("COVER_CACHE_DIR", "/data/cover_cache")
 
 EVERYONE_TAG = "Everyone"
 
@@ -296,7 +302,7 @@ def match_download_health(title, author, book_type, qbit_torrents, sab_queue, sa
 def audible_search(keywords=None, title=None, author=None, num_results=24):
     params = {
         "num_results": num_results,
-        "response_groups": "product_desc,media",
+        "response_groups": "product_desc,media,product_extended_attrs",
         "marketplace": "US",
     }
     if keywords:
@@ -328,6 +334,7 @@ def audible_to_result(p, existing_requests):
     return {
         "source_id": asin,
         "authorid": None,
+        "language": (p.get("language") or "").strip().lower(),
         "title": p.get("title", ""),
         "subtitle": p.get("subtitle"),
         "author": author_name,
@@ -351,6 +358,7 @@ def goodreads_to_result(item, existing_requests):
     return {
         "source_id": bookid,
         "authorid": item.get("authorid"),
+        "language": (item.get("booklang") or "").strip().lower(),
         "title": item.get("bookname", ""),
         "subtitle": None,
         "author": item.get("authorname", ""),
@@ -373,6 +381,74 @@ def resolve_goodreads_bookid(title, author):
     if best.get("highest_fuzz", 0) < 55:
         return None, None
     return best.get("bookid"), best.get("authorid")
+
+
+# ---------- cover image proxy/cache ----------
+# Cover images (Audible, NYT, LazyLibrarian's own sources) were previously
+# hotlinked straight from origin on every page load - re-fetching dozens of
+# images from slow/rate-limited third-party CDNs on every discover refresh.
+# This proxies + caches them to disk once, then serves cached copies with a
+# long-lived Cache-Control so repeat loads hit neither the origin nor even
+# this server (browser cache) after the first fetch.
+
+os.makedirs(COVER_CACHE_DIR, exist_ok=True)
+COVER_CACHE_TTL_HEADER = "public, max-age=2592000, immutable"  # 30 days
+
+
+def _cover_cache_key(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def _is_safe_cover_url(url: str) -> bool:
+    """Basic SSRF guard - this proxy fetches whatever URL the frontend hands
+    it, so block anything that isn't a plain public http(s) host."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return False
+        for info in socket.getaddrinfo(parsed.hostname, None):
+            ip = ipaddress.ip_address(info[4][0])
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return False
+        return True
+    except Exception:
+        return False
+
+
+@app.get("/api/cover")
+def cover_proxy(u: str):
+    key = _cover_cache_key(u)
+    data_path = os.path.join(COVER_CACHE_DIR, f"{key}.bin")
+    ctype_path = os.path.join(COVER_CACHE_DIR, f"{key}.ctype")
+
+    if os.path.exists(data_path) and os.path.exists(ctype_path):
+        with open(ctype_path, "r") as f:
+            ctype = f.read().strip()
+        with open(data_path, "rb") as f:
+            return Response(content=f.read(), media_type=ctype, headers={"Cache-Control": COVER_CACHE_TTL_HEADER})
+
+    if not _is_safe_cover_url(u):
+        raise HTTPException(status_code=400, detail="Unsupported cover URL")
+
+    try:
+        r = requests.get(u, timeout=10, stream=True, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        content = r.content
+        if len(content) > 10 * 1024 * 1024:  # 10MB - a cover image is never legitimately this big
+            raise HTTPException(status_code=502, detail="Cover image too large")
+        ctype = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning("cover fetch failed for %s: %s", u, e)
+        raise HTTPException(status_code=502, detail="Failed to fetch cover")
+
+    with open(data_path, "wb") as f:
+        f.write(content)
+    with open(ctype_path, "w") as f:
+        f.write(ctype)
+
+    return Response(content=content, media_type=ctype, headers={"Cache-Control": COVER_CACHE_TTL_HEADER})
 
 
 # ---------- schema ----------
@@ -405,8 +481,39 @@ def list_users():
     return get_users()
 
 
+# Audible/GoodReads return editions in every language for a keyword search, and
+# there is no working server-side filter (language=english is ignored; locale=
+# returns nothing). So we filter here. "unknown" is always kept - a lot of
+# GoodReads records have no booklang and dropping them hides good results.
+LANG_ALIASES = {
+    "english": {"english", "eng", "en", "en-us", "en-gb", "en_us", "en_gb"},
+    "spanish": {"spanish", "spa", "es", "espanol", "español"},
+    "german":  {"german", "ger", "deu", "de"},
+    "french":  {"french", "fre", "fra", "fr"},
+    "italian": {"italian", "ita", "it"},
+    "japanese": {"japanese", "jpn", "ja"},
+}
+
+def matches_language(value, wanted):
+    """wanted='all' passes everything; unknown/blank always passes."""
+    if wanted in ("", "all"):
+        return True
+    v = (value or "").strip().lower()
+    if not v or v in ("unknown", "none", "null"):
+        return True
+    return v in LANG_ALIASES.get(wanted, {wanted})
+
+
+@app.get("/api/languages")
+def languages():
+    """Selector options for the UI."""
+    return [{"value": "all", "label": "All languages"}] + [
+        {"value": k, "label": k.capitalize()} for k in sorted(LANG_ALIASES)
+    ]
+
+
 @app.get("/api/search")
-def search(q: str, book_type: str = "audiobook"):
+def search(q: str, book_type: str = "audiobook", language: str = "english"):
     if not q.strip():
         return []
 
@@ -435,6 +542,12 @@ def search(q: str, book_type: str = "audiobook"):
             seen.add(r["source_id"])
             deduped.append(r)
         results = deduped
+
+    wanted = (language or "english").strip().lower()
+    before = len(results)
+    results = [r for r in results if matches_language(r.get("language"), wanted)]
+    if before != len(results):
+        logger.info(f"language filter '{wanted}': {before} -> {len(results)} results for {q!r}")
 
     def sort_key(r):
         d = r["release_date"] or "0000"
@@ -697,9 +810,20 @@ def create_request(req: RequestIn):
                 logger.warning(f"Polling for {ll_bookid} failed: {e}")
             time.sleep(1)
 
+        # Not-out-yet books (preorders) get held at Skipped instead of Wanted -
+        # LL's own catalog scanner already uses this same convention for
+        # future-dated books it discovers on its own. poll_once() promotes it
+        # to Wanted automatically once the release date arrives, so there's
+        # nothing left to search for before a copy can possibly exist -
+        # every cycle spent searching for it before then is 100% wasted load
+        # against providers (ABB especially) with zero chance of a hit.
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        is_future_release = bool(req.release_date) and req.release_date != "0000" and req.release_date > today
+        target_status = "Skipped" if is_future_release else "Wanted"
+
         def mark_wanted():
             conn = get_ll_db_readwrite()
-            conn.execute(f"UPDATE books SET {status_col}=? WHERE BookID=?", ("Wanted", ll_bookid))
+            conn.execute(f"UPDATE books SET {status_col}=? WHERE BookID=?", (target_status, ll_bookid))
             if not other_active:
                 conn.execute(f"UPDATE books SET {other_status_col}=? WHERE BookID=? AND {other_status_col}='Wanted'",
                              ("Skipped", ll_bookid))
@@ -722,16 +846,19 @@ def create_request(req: RequestIn):
                 conn = get_ll_db_readonly()
                 row = conn.execute(f"SELECT {status_col} as st, {other_status_col} as ost FROM books WHERE BookID=?", (ll_bookid,)).fetchone()
                 conn.close()
-                if row and (row["st"] != "Wanted" or (not other_active and row["ost"] == "Wanted")):
+                if row and (row["st"] != target_status or (not other_active and row["ost"] == "Wanted")):
                     logger.info(f"{ll_bookid} status drifted (st={row['st']!r} ost={row['ost']!r}), re-applying")
                     mark_wanted()
             except Exception as e:
                 logger.warning(f"Post-check for {ll_bookid} failed: {e}")
 
-        try:
-            ll_api("searchBook", id=ll_bookid)
-        except Exception as e:
-            logger.warning(f"searchBook trigger failed (will pick up on next scheduled search): {e}")
+        if is_future_release:
+            logger.info(f"{ll_bookid} not out until {req.release_date}, holding at Skipped instead of searching now")
+        else:
+            try:
+                ll_api("searchBook", id=ll_bookid)
+            except Exception as e:
+                logger.warning(f"searchBook trigger failed (will pick up on next scheduled search): {e}")
 
     conn = get_local_db()
     try:
@@ -894,13 +1021,42 @@ def poll_once():
     conn_local = get_local_db()
     try:
         rows = conn_local.execute(
-            "SELECT id, ll_bookid, book_type, status, title, author FROM requests "
+            "SELECT id, ll_bookid, book_type, status, title, author, release_date FROM requests "
             "WHERE status NOT IN ('downloaded', 'unresolved')"
         ).fetchall()
     finally:
         conn_local.close()
     if not rows:
         return
+
+    # Promote preorders held at Skipped (see create_request) to Wanted once
+    # their release date actually arrives, so LL's normal search cron picks
+    # them up starting exactly then - not before (nothing to find) and not
+    # stuck waiting on a manual nudge after release either.
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    due = [r for r in rows if r["status"] == "submitted" and r["ll_bookid"]
+           and r["release_date"] and r["release_date"] != "0000" and r["release_date"] <= today]
+    if due:
+        try:
+            conn_ll_rw = get_ll_db_readwrite()
+            try:
+                for r in due:
+                    status_col = "AudioStatus" if r["book_type"] == "audiobook" else "Status"
+                    cur = conn_ll_rw.execute(
+                        f"SELECT {status_col} as st FROM books WHERE BookID=?", (r["ll_bookid"],)
+                    ).fetchone()
+                    if cur and cur["st"] == "Skipped":
+                        conn_ll_rw.execute(f"UPDATE books SET {status_col}=? WHERE BookID=?", ("Wanted", r["ll_bookid"]))
+                        logger.info(f"{r['ll_bookid']} ({r['title']}) released {r['release_date']}, promoting Skipped -> Wanted")
+                        try:
+                            ll_api("searchBook", id=r["ll_bookid"])
+                        except Exception as e:
+                            logger.warning(f"searchBook trigger failed for newly-released {r['ll_bookid']} (will pick up on next scheduled search): {e}")
+                conn_ll_rw.commit()
+            finally:
+                conn_ll_rw.close()
+        except Exception as e:
+            logger.warning(f"preorder promotion check failed: {e}")
 
     try:
         conn_ll = get_ll_db_readonly()

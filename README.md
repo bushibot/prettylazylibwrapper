@@ -126,3 +126,13 @@ server-side, so normal use won't come close to that.
 ## License
 
 MIT
+
+## LazyLibrarian configuration
+
+This app is a front-end for LazyLibrarian — LL does the searching, downloading and
+filing. A correct LL configuration matters as much as the app itself.
+
+See **[LAZYLIBRARIAN-SETUP.md](LAZYLIBRARIAN-SETUP.md)** for the full working
+configuration: naming templates that match Audiobookshelf's parser, the
+one-book-per-folder prerequisite (and the library corruption that follows without
+it), metadata precedence, and known upstream bugs.
