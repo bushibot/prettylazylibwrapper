@@ -1,4 +1,6 @@
+import os
 import re
+import json
 import time
 import random
 import logging
@@ -22,6 +24,40 @@ CACHE_TTL = 600  # seconds, avoid re-hitting a detail page repeatedly across req
 app = FastAPI()
 
 _detail_cache: dict[str, tuple[float, dict]] = {}
+
+# LL's own cron re-searches every wanted book every 15 minutes, but a given
+# audiobook only ever shows up on ABB once - checking dozens of times a day
+# is pure wasted load against a scraped site with no real API. One real check
+# per book per day is plenty (new releases don't appear more than once a
+# week per the household's own usage), and this doubles as the on-demand
+# path too: whichever request happens to be the first one for a given book
+# that day (cron or a human searching) is the one that actually reaches ABB;
+# everything else that day for the same book is served from this cache.
+DATA_DIR = os.environ.get("DATA_DIR", "/data")
+SEARCH_CACHE_PATH = os.path.join(DATA_DIR, "abb_search_cache.json")
+SEARCH_CACHE_TTL = 24 * 60 * 60
+_search_cache_lock = threading.Lock()
+
+
+def _load_search_cache() -> dict:
+    try:
+        with open(SEARCH_CACHE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_search_cache(cache: dict):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = SEARCH_CACHE_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cache, f)
+    os.replace(tmp, SEARCH_CACHE_PATH)
+
+
+def _book_key(q: str, author: str, title: str) -> str:
+    raw = q or f"{author} {title}"
+    return re.sub(r"\s+", " ", raw.strip().lower())
 
 HEALTH_CACHE_TTL = 120  # seconds - a real connectivity check on every poll would
                         # itself look like scraping traffic against the site
@@ -292,6 +328,14 @@ def api(
             status_code=401,
         )
 
+    book_key = _book_key(q, author, title)
+    with _search_cache_lock:
+        cached = _load_search_cache().get(book_key)
+    if cached and time.time() - cached["checked_at"] < SEARCH_CACHE_TTL:
+        age_hrs = (time.time() - cached["checked_at"]) / 3600
+        log.info("book_key=%r served from cache (checked %.1fh ago), skipping ABB", book_key, age_hrs)
+        return Response(content=rss_wrapper(cached["items"]), media_type="application/xml")
+
     # Build query attempts in priority order. ABB's own search is a fussy
     # WordPress fuzzy search - "title only" often finds nothing while
     # "author + title" or "author only" succeeds, so try progressively
@@ -333,6 +377,12 @@ def api(
             items.append(detail)
 
     log.info("used_query=%r -> %d candidates, %d with usable magnet data", used_query, len(candidates), len(items))
+
+    with _search_cache_lock:
+        cache = _load_search_cache()
+        cache[book_key] = {"checked_at": time.time(), "items": items}
+        _save_search_cache(cache)
+
     return Response(content=rss_wrapper(items), media_type="application/xml")
 
 
