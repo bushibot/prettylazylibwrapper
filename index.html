@@ -382,14 +382,21 @@ async function submitRequest(requester) {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
     });
-    if (!r.ok) throw new Error(await r.text());
+    if (!r.ok) {
+      // FastAPI errors come back as {"detail": "..."} - fall back to a
+      // calm generic message rather than ever showing raw JSON/exception
+      // text in the alert a household member sees.
+      let detail = "Please try again in a minute.";
+      try { detail = (await r.json()).detail || detail; } catch {}
+      throw new Error(detail);
+    }
     const result = await r.json();
     if (!result.resolved) {
       alert(`Requested for ${requester}, but LazyLibrarian couldn't find a matching catalog entry for "${item.title}" yet - it's saved and flagged, but won't auto-download until that's sorted out.`);
     }
     runSearch();
   } catch (e) {
-    alert("Request failed: " + e.message);
+    alert(e.message);
     if (btn) {
       btn.disabled = false;
       btn.classList.remove("working");

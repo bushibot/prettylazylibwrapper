@@ -97,14 +97,27 @@ def get_ll_db_readwrite():
 
 
 def ll_api(cmd, **params):
+    """LL occasionally takes a while to answer mid-postprocess (a big
+    download batch can tie it up for tens of seconds) - that's normal
+    business, not an outage, so a lone connection/timeout blip gets a
+    couple of quick retries before this actually gives up and reports
+    LL as unreachable."""
     p = {"apikey": cfg.LL_API_KEY, "cmd": cmd}
     p.update(params)
-    r = requests.get(f"{cfg.LL_URL}/api", params=p, timeout=30)
-    r.raise_for_status()
-    try:
-        return r.json()
-    except ValueError:
-        return r.text
+    last_exc = None
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{cfg.LL_URL}/api", params=p, timeout=30)
+            r.raise_for_status()
+            try:
+                return r.json()
+            except ValueError:
+                return r.text
+        except (requests.ConnectionError, requests.Timeout) as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+    raise last_exc
 
 
 def normalize(s):
@@ -772,7 +785,18 @@ def create_request(req: RequestIn):
         try:
             ll_api("addBook", id=ll_bookid)
         except Exception as e:
-            raise HTTPException(502, f"Failed to reach LazyLibrarian: {e}")
+            # The raw exception (connection refused, read timeout, etc) is
+            # genuinely alarming to a non-technical household member and
+            # reads as "the whole system is broken" - it's logged here for
+            # whoever's actually troubleshooting, but what the requester
+            # sees stays calm and actionable, since ll_api() already retried
+            # past anything momentary before giving up.
+            logger.error(f"addBook failed for LL book {ll_bookid}: {e}")
+            raise HTTPException(
+                503,
+                "LazyLibrarian is busy or briefly unreachable - your "
+                "request wasn't saved. Please try again in a minute.",
+            )
 
         status_col = "AudioStatus" if req.book_type == "audiobook" else "Status"
         other_type = "ebook" if req.book_type == "audiobook" else "audiobook"
