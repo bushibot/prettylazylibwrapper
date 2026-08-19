@@ -87,15 +87,6 @@ def get_ll_db_readonly():
     return conn
 
 
-def get_ll_db_readwrite():
-    # used only to flip Status/AudioStatus to Wanted after LL has created the book row -
-    # LL's own API has no apikey-only "mark wanted" command, and the web endpoint that
-    # does this needs a logged-in session, so we do the same write LL itself would do.
-    conn = sqlite3.connect(LL_DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
 def ll_api(cmd, **params):
     """LL occasionally takes a while to answer mid-postprocess (a big
     download batch can tie it up for tens of seconds) - that's normal
@@ -846,20 +837,48 @@ def create_request(req: RequestIn):
         target_status = "Skipped" if is_future_release else "Wanted"
 
         def mark_wanted():
-            conn = get_ll_db_readwrite()
-            conn.execute(f"UPDATE books SET {status_col}=? WHERE BookID=?", (target_status, ll_bookid))
+            # Goes through LL's own queueBook/unqueueBook/setBookLock API commands
+            # instead of writing to lazylibrarian.db directly - a direct write from
+            # here once collided with LL's own concurrent writes and corrupted the
+            # database (see lazylibrarian-db-corruption-20260818.md). These commands
+            # run inside LL's own process against its own already-open connection,
+            # so there's no second writer to race.
+            api_type = "AudioBook" if status_col == "AudioStatus" else ""
+            if target_status == "Wanted":
+                ll_api("queueBook", id=ll_bookid, type=api_type)
+            # else: future release - leave at LL's own default Skipped, nothing to do
+
             if not other_active:
-                conn.execute(f"UPDATE books SET {other_status_col}=? WHERE BookID=? AND {other_status_col}='Wanted'",
-                             ("Skipped", ll_bookid))
-            conn.commit()
-            conn.close()
+                # Only clear the other format if IT is currently Wanted - never
+                # stomp Have/Open/Snatched for a format the household already owns.
+                conn = get_ll_db_readonly()
+                try:
+                    row = conn.execute(
+                        f"SELECT {other_status_col} as st FROM books WHERE BookID=?", (ll_bookid,)
+                    ).fetchone()
+                finally:
+                    conn.close()
+                if row and row["st"] == "Wanted":
+                    other_api_type = "AudioBook" if other_status_col == "AudioStatus" else ""
+                    ll_api("unqueueBook", id=ll_bookid, type=other_api_type)
+
+            # Lock the book so LL's own author-refresh scan can't silently flip
+            # Status/AudioStatus back to its collection-pattern default - this is
+            # what was actually broken (an ebook request on an author this
+            # household mostly owns in audio kept reverting to AudioStatus=Wanted).
+            ll_api("setBookLock", id=ll_bookid)
 
         if not book_exists:
             logger.warning(f"{ll_bookid} never appeared in LL's DB after addBook - marking wanted anyway in case it lands late")
         try:
             mark_wanted()
         except Exception as e:
-            raise HTTPException(502, f"Failed to mark book wanted in LazyLibrarian: {e}")
+            logger.error(f"mark_wanted failed for LL book {ll_bookid}: {e}")
+            raise HTTPException(
+                503,
+                "LazyLibrarian is busy or briefly unreachable - your "
+                "request wasn't saved. Please try again in a minute.",
+            )
 
         # LL's own background import can still be mid-flight and clobber the status
         # we just set once it finishes its own upsert. Re-check and re-apply a couple
@@ -1010,11 +1029,9 @@ def cleanup_stale_torrents(torrents):
             score = _word_overlap(target_words, r["title"])
             if score > 0.5 and r["ll_bookid"]:
                 try:
-                    conn = get_ll_db_readwrite()
                     status_col = "AudioStatus" if r["book_type"] == "audiobook" else "Status"
-                    conn.execute(f"UPDATE books SET {status_col}=? WHERE BookID=?", ("Wanted", r["ll_bookid"]))
-                    conn.commit()
-                    conn.close()
+                    api_type = "AudioBook" if status_col == "AudioStatus" else ""
+                    ll_api("queueBook", id=r["ll_bookid"], type=api_type)
                     logger.info(f"Stale torrent for '{r['title']}' (0 seeds, {STALE_MIN_AGE_SECONDS // 86400}+ days at ~0%) - reset to Wanted for retry")
                 except Exception as e:
                     logger.warning(f"Failed to reset stale request {r['id']}: {e}")
@@ -1062,23 +1079,23 @@ def poll_once():
            and r["release_date"] and r["release_date"] != "0000" and r["release_date"] <= today]
     if due:
         try:
-            conn_ll_rw = get_ll_db_readwrite()
+            conn_ll_ro = get_ll_db_readonly()
             try:
                 for r in due:
                     status_col = "AudioStatus" if r["book_type"] == "audiobook" else "Status"
-                    cur = conn_ll_rw.execute(
+                    cur = conn_ll_ro.execute(
                         f"SELECT {status_col} as st FROM books WHERE BookID=?", (r["ll_bookid"],)
                     ).fetchone()
                     if cur and cur["st"] == "Skipped":
-                        conn_ll_rw.execute(f"UPDATE books SET {status_col}=? WHERE BookID=?", ("Wanted", r["ll_bookid"]))
+                        api_type = "AudioBook" if status_col == "AudioStatus" else ""
+                        ll_api("queueBook", id=r["ll_bookid"], type=api_type)
                         logger.info(f"{r['ll_bookid']} ({r['title']}) released {r['release_date']}, promoting Skipped -> Wanted")
                         try:
                             ll_api("searchBook", id=r["ll_bookid"])
                         except Exception as e:
                             logger.warning(f"searchBook trigger failed for newly-released {r['ll_bookid']} (will pick up on next scheduled search): {e}")
-                conn_ll_rw.commit()
             finally:
-                conn_ll_rw.close()
+                conn_ll_ro.close()
         except Exception as e:
             logger.warning(f"preorder promotion check failed: {e}")
 
