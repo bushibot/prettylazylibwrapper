@@ -880,20 +880,40 @@ def create_request(req: RequestIn):
                 "request wasn't saved. Please try again in a minute.",
             )
 
-        # LL's own background import can still be mid-flight and clobber the status
-        # we just set once it finishes its own upsert. Re-check and re-apply a couple
-        # of times over the next few seconds as a safety net against that race.
-        for _ in range(3):
-            time.sleep(2)
-            try:
-                conn = get_ll_db_readonly()
-                row = conn.execute(f"SELECT {status_col} as st, {other_status_col} as ost FROM books WHERE BookID=?", (ll_bookid,)).fetchone()
-                conn.close()
-                if row and (row["st"] != target_status or (not other_active and row["ost"] == "Wanted")):
-                    logger.info(f"{ll_bookid} status drifted (st={row['st']!r} ost={row['ost']!r}), re-applying")
-                    mark_wanted()
-            except Exception as e:
-                logger.warning(f"Post-check for {ll_bookid} failed: {e}")
+        # addBook's import runs in a background thread on LL's own side (see
+        # LazyLibrarian's api.py _addonebook -> threading.Thread(...)) and for
+        # an author with a full catalog it can still be mid-flight tens of
+        # seconds after addBook already returned "OK" - well past setBookLock
+        # having landed, if that import reads this book's row before our lock
+        # write reaches the DB. A 6-second recheck window (the original
+        # design) wasn't long enough to catch that in practice - confirmed by
+        # a real request on an author with 22 books, where the correction
+        # never happened at all before the window closed. Run this in the
+        # background instead of blocking the user's request, so the window
+        # can be generous (a minute) without the "Requesting..." button
+        # sitting there the whole time.
+        def recheck_and_fix_drift():
+            for _ in range(20):
+                time.sleep(3)
+                try:
+                    conn = get_ll_db_readonly()
+                    row = conn.execute(
+                        f"SELECT {status_col} as st, {other_status_col} as ost FROM books WHERE BookID=?",
+                        (ll_bookid,)
+                    ).fetchone()
+                    conn.close()
+                    if row and (row["st"] != target_status or (not other_active and row["ost"] == "Wanted")):
+                        logger.info(f"{ll_bookid} status drifted (st={row['st']!r} ost={row['ost']!r}), re-applying")
+                        mark_wanted()
+                        if not is_future_release:
+                            try:
+                                ll_api("searchBook", id=ll_bookid)
+                            except Exception as e:
+                                logger.warning(f"searchBook retrigger after drift-fix failed for {ll_bookid}: {e}")
+                except Exception as e:
+                    logger.warning(f"Post-check for {ll_bookid} failed: {e}")
+
+        threading.Thread(target=recheck_and_fix_drift, daemon=True).start()
 
         if is_future_release:
             logger.info(f"{ll_bookid} not out until {req.release_date}, holding at Skipped instead of searching now")
