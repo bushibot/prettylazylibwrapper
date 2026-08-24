@@ -11,7 +11,7 @@
   <Overview>Family-friendly frontend for LazyLibrarian - search Audible/GoodReads for clean results and covers, request with one click, tracks status (Wanted/Snatched/Downloaded) per requester. Includes a built-in AudioBookBay Torznab indexer bridge. Requires LazyLibrarian; recommended alongside Audiobookshelf. LAN/Tailscale use only - no authentication.</Overview>
   <Category>MediaApp:Other</Category>
   <WebUI>http://[IP]:[PORT:80]/</WebUI>
-  <Icon/>
+  <Icon>https://raw.githubusercontent.com/bushibot/prettylazylibwrapper/main/assets/icon.png</Icon>
   <ExtraParams/>
   <PostArgs/>
   <CPUset/>
