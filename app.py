@@ -118,7 +118,13 @@ def init_local_db():
 # db and so is wired up here rather than living in backends.py.
 
 def normalize(s):
-    return re.sub(r'[^a-z0-9]+', ' ', (s or '').lower()).strip()
+    # Strip apostrophes outright (not just treat as a separator) before the
+    # general punctuation collapse - "Anarchist's" and "Anarchists" need to
+    # normalize identically, or already-have/dedup checks miss real matches.
+    # Confirmed live: exactly this gap let "The Dungeon Anarchist's Cookbook"
+    # and "The Dungeon Anarchists Cookbook" both download as separate books.
+    s = (s or '').lower().replace("'", "").replace("’", "")
+    return re.sub(r'[^a-z0-9]+', ' ', s).strip()
 
 
 init_settings_db()  # must exist before get_backend() below reads cfg.BACKEND
