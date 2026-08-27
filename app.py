@@ -92,7 +92,6 @@ def normalize(s):
 
 
 init_settings_db()  # must exist before get_backend() below reads cfg.BACKEND
-backend = get_backend(cfg, LL_DB_PATH)
 
 
 def _ll_other_format_active(ll_bookid, other_type):
@@ -106,8 +105,14 @@ def _ll_other_format_active(ll_bookid, other_type):
         conn.close()
 
 
-if backend.name == "lazylibrarian":
-    backend.attach_other_active_checker(_ll_other_format_active)
+def get_active_backend():
+    """Resolved fresh on every call (both constructors are cheap - just
+    attribute assignment, no I/O) so a BACKEND change made on /config takes
+    effect on the very next request, no restart needed."""
+    b = get_backend(cfg, LL_DB_PATH)
+    if b.name == "lazylibrarian":
+        b.attach_other_active_checker(_ll_other_format_active)
+    return b
 
 
 # ---------- already-owned check (Audiobookshelf, independent of backend) ----------
@@ -525,10 +530,11 @@ def search(q: str, book_type: str = "audiobook", language: str = "english"):
             products = []
         results = [audible_to_result(p, existing_requests) for p in products]
     else:
+        active_backend = get_active_backend()
         try:
-            raw_results = backend.search_ebook(q)
+            raw_results = active_backend.search_ebook(q)
         except Exception as e:
-            logger.warning(f"ebook search failed ({backend.name}): {e}")
+            logger.warning(f"ebook search failed ({active_backend.name}): {e}")
             raw_results = []
         results = [catalog_result_to_dict(r, existing_requests) for r in raw_results]
         seen = set()
@@ -756,8 +762,9 @@ def create_request(req: RequestIn):
     # inside backend.submit(). See backends.py: LLBackend does exactly what
     # this function used to do inline; ShelfarrBackend's model needs none
     # of the locking/drift-correction machinery LL's does.
+    active_backend = get_active_backend()
     try:
-        result = backend.submit(
+        result = active_backend.submit(
             title=req.title,
             author=req.author,
             book_type=req.book_type,
@@ -772,10 +779,10 @@ def create_request(req: RequestIn):
         # as "the whole system is broken" - logged here for whoever's
         # actually troubleshooting, but what the requester sees stays calm
         # and actionable.
-        logger.error(f"{backend.name} submit failed for {req.title!r}: {e}")
+        logger.error(f"{active_backend.name} submit failed for {req.title!r}: {e}")
         raise HTTPException(
             503,
-            f"{backend.name.capitalize()} is busy or briefly unreachable - "
+            f"{active_backend.name.capitalize()} is busy or briefly unreachable - "
             "your request wasn't saved. Please try again in a minute.",
         )
 
@@ -906,6 +913,7 @@ def cleanup_stale_torrents(torrents):
     finally:
         conn_local.close()
 
+    active_backend = get_active_backend()
     removed_hashes = []
     for h, t in stale:
         target_words = set(normalize(t.get("name", "")).split())
@@ -913,7 +921,7 @@ def cleanup_stale_torrents(torrents):
             score = _word_overlap(target_words, r["title"])
             if score > 0.5 and r["ll_bookid"]:
                 try:
-                    backend.reset_wanted(r["ll_bookid"], r["book_type"])
+                    active_backend.reset_wanted(r["ll_bookid"], r["book_type"])
                     logger.info(f"Stale torrent for '{r['title']}' (0 seeds, {STALE_MIN_AGE_SECONDS // 86400}+ days at ~0%) - reset for retry")
                 except Exception as e:
                     logger.warning(f"Failed to reset stale request {r['id']}: {e}")
@@ -952,12 +960,14 @@ def poll_once():
     if not rows:
         return
 
+    active_backend = get_active_backend()
+
     # Backend-specific maintenance (LL: promote preorders held at Skipped
     # once their release date arrives, so its normal search cron picks
     # them up starting exactly then; Shelfarr: no-op, its own recurring
     # jobs already handle this).
     try:
-        backend.poll_maintenance(rows)
+        active_backend.poll_maintenance(rows)
     except Exception as e:
         logger.warning(f"backend poll_maintenance failed: {e}")
 
@@ -978,9 +988,9 @@ def poll_once():
         # 1. status against the backend's own catalog (Wanted/Snatched/Downloaded)
         if r["ll_bookid"]:
             try:
-                new_status = backend.get_status(r["ll_bookid"], r["book_type"])
+                new_status = active_backend.get_status(r["ll_bookid"], r["book_type"])
             except Exception as e:
-                logger.warning(f"poll: {backend.name} lookup failed for {r['ll_bookid']}: {e}")
+                logger.warning(f"poll: {active_backend.name} lookup failed for {r['ll_bookid']}: {e}")
                 new_status = None
             if new_status and new_status != r["status"]:
                 status_updates.append((new_status, r["id"]))
