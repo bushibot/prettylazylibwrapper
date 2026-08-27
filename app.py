@@ -22,7 +22,7 @@ from settings import (
     get_all_settings_masked, SETTING_FIELDS,
 )
 from abb_bridge import app as abb_app
-from backends import get_backend
+from backends import get_backend, get_backend_by_name
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("prettylazylibwrapper")
@@ -67,14 +67,18 @@ def init_local_db():
             progress_pct REAL DEFAULT 0,
             download_health TEXT DEFAULT 'sending',  -- sending, downloading, slow, stalled, broken, done
             health_checked_at TEXT,
+            backend TEXT,                 -- which backend (lazylibrarian/shelfarr) created this row
             UNIQUE(source_id, book_type)
         )
     """)
     # in case of upgrading an existing db that predates these columns
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(requests)")}
-    for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL")]:
+    for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL"), ("backend", "NULL")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT DEFAULT {default}")
+    # rows created before the backend column existed all came from LL - the
+    # only backend that existed at the time - so that's the correct backfill
+    conn.execute("UPDATE requests SET backend='lazylibrarian' WHERE backend IS NULL")
     conn.commit()
     conn.close()
 
@@ -110,6 +114,17 @@ def get_active_backend():
     attribute assignment, no I/O) so a BACKEND change made on /config takes
     effect on the very next request, no restart needed."""
     b = get_backend(cfg, LL_DB_PATH)
+    if b.name == "lazylibrarian":
+        b.attach_other_active_checker(_ll_other_format_active)
+    return b
+
+
+def get_backend_for_row(row_backend_name):
+    """For polling/reset on an *existing* request row - always resolves
+    against whichever backend actually created it (requests.backend),
+    never the live BACKEND setting, since that can differ once a request
+    has been sitting in-flight across a backend switch."""
+    b = get_backend_by_name(row_backend_name or "lazylibrarian", cfg, LL_DB_PATH)
     if b.name == "lazylibrarian":
         b.attach_other_active_checker(_ll_other_format_active)
     return b
@@ -789,12 +804,12 @@ def create_request(req: RequestIn):
     conn = get_local_db()
     try:
         conn.execute("""
-            INSERT INTO requests (requester, book_type, source_id, ll_bookid, authorid, title, author, cover_url, release_date, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO requests (requester, book_type, source_id, ll_bookid, authorid, title, author, cover_url, release_date, status, created_at, updated_at, backend)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id, book_type) DO UPDATE SET
-                requester=excluded.requester, updated_at=excluded.updated_at
+                requester=excluded.requester, updated_at=excluded.updated_at, backend=excluded.backend
         """, (req.requester, req.book_type, req.source_id, result.backend_ref, req.authorid, req.title, req.author,
-              req.cover, req.release_date, result.status, now, now))
+              req.cover, req.release_date, result.status, now, now, active_backend.name))
         conn.commit()
     finally:
         conn.close()
@@ -908,12 +923,11 @@ def cleanup_stale_torrents(torrents):
     conn_local = get_local_db()
     try:
         pending = conn_local.execute(
-            "SELECT id, ll_bookid, book_type, title, author FROM requests WHERE status IN ('wanted', 'snatched')"
+            "SELECT id, ll_bookid, book_type, title, author, backend FROM requests WHERE status IN ('wanted', 'snatched')"
         ).fetchall()
     finally:
         conn_local.close()
 
-    active_backend = get_active_backend()
     removed_hashes = []
     for h, t in stale:
         target_words = set(normalize(t.get("name", "")).split())
@@ -921,7 +935,7 @@ def cleanup_stale_torrents(torrents):
             score = _word_overlap(target_words, r["title"])
             if score > 0.5 and r["ll_bookid"]:
                 try:
-                    active_backend.reset_wanted(r["ll_bookid"], r["book_type"])
+                    get_backend_for_row(r["backend"]).reset_wanted(r["ll_bookid"], r["book_type"])
                     logger.info(f"Stale torrent for '{r['title']}' (0 seeds, {STALE_MIN_AGE_SECONDS // 86400}+ days at ~0%) - reset for retry")
                 except Exception as e:
                     logger.warning(f"Failed to reset stale request {r['id']}: {e}")
@@ -952,7 +966,7 @@ def poll_once():
     conn_local = get_local_db()
     try:
         rows = conn_local.execute(
-            "SELECT id, ll_bookid, book_type, status, title, author, release_date FROM requests "
+            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend FROM requests "
             "WHERE status NOT IN ('downloaded', 'unresolved')"
         ).fetchall()
     finally:
@@ -960,16 +974,26 @@ def poll_once():
     if not rows:
         return
 
-    active_backend = get_active_backend()
+    # Requests are polled against whichever backend actually created them
+    # (requests.backend), not whichever backend is live right now - a row
+    # can outlive a BACKEND switch and still needs to reach its own system
+    # of record. Grouped so poll_maintenance and get_status each only see
+    # rows their own backend actually knows about.
+    rows_by_backend = {}
+    for r in rows:
+        rows_by_backend.setdefault(r["backend"] or "lazylibrarian", []).append(r)
+
+    backends_by_name = {name: get_backend_for_row(name) for name in rows_by_backend}
 
     # Backend-specific maintenance (LL: promote preorders held at Skipped
     # once their release date arrives, so its normal search cron picks
     # them up starting exactly then; Shelfarr: no-op, its own recurring
     # jobs already handle this).
-    try:
-        active_backend.poll_maintenance(rows)
-    except Exception as e:
-        logger.warning(f"backend poll_maintenance failed: {e}")
+    for name, backend_rows in rows_by_backend.items():
+        try:
+            backends_by_name[name].poll_maintenance(backend_rows)
+        except Exception as e:
+            logger.warning(f"{name} poll_maintenance failed: {e}")
 
     status_updates = []
     health_updates = []
@@ -987,10 +1011,11 @@ def poll_once():
     for r in rows:
         # 1. status against the backend's own catalog (Wanted/Snatched/Downloaded)
         if r["ll_bookid"]:
+            row_backend = backends_by_name[r["backend"] or "lazylibrarian"]
             try:
-                new_status = active_backend.get_status(r["ll_bookid"], r["book_type"])
+                new_status = row_backend.get_status(r["ll_bookid"], r["book_type"])
             except Exception as e:
-                logger.warning(f"poll: {active_backend.name} lookup failed for {r['ll_bookid']}: {e}")
+                logger.warning(f"poll: {row_backend.name} lookup failed for {r['ll_bookid']}: {e}")
                 new_status = None
             if new_status and new_status != r["status"]:
                 status_updates.append((new_status, r["id"]))

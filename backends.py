@@ -565,6 +565,19 @@ class ShelfarrBackend(Backend):
 # ---------------------------------------------------------------------------
 
 def get_backend(cfg, ll_db_path):
-    if cfg.BACKEND == "shelfarr":
+    return get_backend_by_name(cfg.BACKEND, cfg, ll_db_path)
+
+
+def get_backend_by_name(name, cfg, ll_db_path):
+    """Instantiate a specific backend regardless of the live BACKEND setting.
+
+    Needed because a request's status must always be looked up against
+    whichever backend actually created it (recorded per-row in the
+    requests.backend column) - not whichever backend happens to be live
+    right now. Switching BACKEND only changes where *new* requests go;
+    existing in-flight requests from the other backend still need to be
+    polled against it until they finish.
+    """
+    if name == "shelfarr":
         return ShelfarrBackend(cfg)
     return LLBackend(cfg, ll_db_path)
