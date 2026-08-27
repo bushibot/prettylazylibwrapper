@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py .
 COPY abb_bridge.py .
 COPY settings.py .
+COPY backends.py .
 COPY static ./static
 
 RUN mkdir -p /data

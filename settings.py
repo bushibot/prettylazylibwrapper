@@ -7,8 +7,15 @@ LOCAL_DB_PATH = os.environ.get("LOCAL_DB_PATH", "/data/prettylazylibwrapper.db")
 # and the /config page's rendered form. Env vars of the same name seed a fresh
 # install; values saved via /config take precedence after that.
 SETTING_FIELDS = [
+    ("BACKEND", "Acquisition backend: lazylibrarian or shelfarr", False, "lazylibrarian"),
     ("LL_URL", "LazyLibrarian URL", False, ""),
     ("LL_API_KEY", "LazyLibrarian API key", True, ""),
+    ("SHELFARR_URL", "Shelfarr URL (used when BACKEND=shelfarr)", False, ""),
+    ("SHELFARR_API_KEY", "Shelfarr API token (used when BACKEND=shelfarr)", True, ""),
+    ("ABS_URL", "Audiobookshelf URL, used for the already-owned check (independent of BACKEND)", False, ""),
+    ("ABS_API_KEY", "Audiobookshelf API token", True, ""),
+    ("ABS_AUDIOBOOK_LIBRARY_ID", "Audiobookshelf audiobook library ID", False, ""),
+    ("ABS_EBOOK_LIBRARY_ID", "Audiobookshelf ebook library ID", False, ""),
     ("QBIT_URL", "qBittorrent URL", False, ""),
     ("QBIT_USER", "qBittorrent username", False, "admin"),
     ("QBIT_PASS", "qBittorrent password", True, ""),

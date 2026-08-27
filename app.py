@@ -22,6 +22,7 @@ from settings import (
     get_all_settings_masked, SETTING_FIELDS,
 )
 from abb_bridge import app as abb_app
+from backends import get_backend
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("prettylazylibwrapper")
@@ -78,65 +79,74 @@ def init_local_db():
     conn.close()
 
 
-# ---------- LazyLibrarian's db (shared, read-mostly) ----------
-
-def get_ll_db_readonly():
-    uri = f"file:{LL_DB_PATH}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, timeout=5)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def ll_api(cmd, **params):
-    """LL occasionally takes a while to answer mid-postprocess (a big
-    download batch can tie it up for tens of seconds) - that's normal
-    business, not an outage, so a lone connection/timeout blip gets a
-    couple of quick retries before this actually gives up and reports
-    LL as unreachable."""
-    p = {"apikey": cfg.LL_API_KEY, "cmd": cmd}
-    p.update(params)
-    last_exc = None
-    for attempt in range(3):
-        try:
-            r = requests.get(f"{cfg.LL_URL}/api", params=p, timeout=30)
-            r.raise_for_status()
-            try:
-                return r.json()
-            except ValueError:
-                return r.text
-        except (requests.ConnectionError, requests.Timeout) as e:
-            last_exc = e
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-    raise last_exc
-
+# ---------- acquisition backend (LazyLibrarian or Shelfarr) ----------
+# Which one is active is a live setting (cfg.BACKEND), so switching is a
+# /config change, not a redeploy. See backends.py for the actual LL/Shelfarr
+# implementations - this module only calls the common Backend interface,
+# with the one exception of LLBackend's "is the other format already
+# actively requested" callback, which needs access to this app's own local
+# db and so is wired up here rather than living in backends.py.
 
 def normalize(s):
     return re.sub(r'[^a-z0-9]+', ' ', (s or '').lower()).strip()
 
 
-def ll_already_have(title, author, book_type):
-    """Fuzzy title/author match against LL's own library - covers the audiobook
-    case where we search Audible but LL's records are keyed by GoodReads id."""
+init_settings_db()  # must exist before get_backend() below reads cfg.BACKEND
+backend = get_backend(cfg, LL_DB_PATH)
+
+
+def _ll_other_format_active(ll_bookid, other_type):
+    conn = get_local_db()
     try:
-        conn = get_ll_db_readonly()
-    except Exception as e:
-        logger.warning(f"Could not open LL db: {e}")
-        return None
-    status_col = "AudioStatus" if book_type == "audiobook" else "Status"
-    try:
-        rows = conn.execute(
-            f"SELECT b.BookName, b.{status_col} as st FROM books b, authors a "
-            "WHERE b.AuthorID = a.AuthorID AND a.AuthorName LIKE ?",
-            (f"%{author.split()[-1]}%",)
-        ).fetchall()
+        return bool(conn.execute(
+            "SELECT 1 FROM requests WHERE ll_bookid=? AND book_type=? AND status NOT IN ('unresolved')",
+            (ll_bookid, other_type)
+        ).fetchone())
     finally:
         conn.close()
-    target = normalize(title)
-    for r in rows:
-        if normalize(r["BookName"]) == target:
-            return r["st"]
-    return None
+
+
+if backend.name == "lazylibrarian":
+    backend.attach_other_active_checker(_ll_other_format_active)
+
+
+# ---------- already-owned check (Audiobookshelf, independent of backend) ----------
+# Previously this was a fuzzy match against LazyLibrarian's own db - moved to
+# ABS directly since that's the actual source of truth for what's owned
+# regardless of which acquisition backend is active, and it closes a real
+# gap Shelfarr's own duplicate-detection has (it only tracks books it
+# acquired itself, not a household's pre-existing library - see
+# scalable-greeting-pike.md).
+
+def abs_already_have(title, author, book_type):
+    lib_id = cfg.ABS_AUDIOBOOK_LIBRARY_ID if book_type == "audiobook" else cfg.ABS_EBOOK_LIBRARY_ID
+    if not (cfg.ABS_URL and cfg.ABS_API_KEY and lib_id):
+        return False
+    try:
+        r = requests.get(
+            f"{cfg.ABS_URL.rstrip('/')}/api/libraries/{lib_id}/search",
+            headers={"Authorization": f"Bearer {cfg.ABS_API_KEY}"},
+            params={"q": title},
+            timeout=10,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        logger.warning(f"ABS already-have check failed: {e}")
+        return False
+
+    target_title = normalize(title)
+    target_author_last = normalize(author).split()[-1] if author else ""
+    for entry in data.get("book", []):
+        meta = (entry.get("libraryItem") or {}).get("media", {}).get("metadata", {})
+        if normalize(meta.get("title", "")) != target_title:
+            continue
+        if not target_author_last:
+            return True
+        authors = meta.get("authors") or []
+        if any(target_author_last in normalize(a.get("name", "")) for a in authors):
+            return True
+    return False
 
 
 # ---------- live download health (qBittorrent / SABnzbd) ----------
@@ -331,7 +341,7 @@ def audible_to_result(p, existing_requests):
     release_date = pub.split("T")[0] if pub else "0000"
     asin = p.get("asin")
 
-    already_have = ll_already_have(p.get("title", ""), author_name, "audiobook") in ("Open", "Have")
+    already_have = abs_already_have(p.get("title", ""), author_name, "audiobook")
     req_status = existing_requests.get(asin)
     is_preorder = release_date != "0000" and release_date > datetime.utcnow().strftime("%Y-%m-%d")
 
@@ -351,40 +361,19 @@ def audible_to_result(p, existing_requests):
     }
 
 
-# ---------- GoodReads (ebook source, and audiobook id-resolution bridge) ----------
+# ---------- ebook catalog search (backend-provided) ----------
+# Was GoodReads-via-LL only; now whichever backend is active shapes its own
+# catalog results into a common dict via backend.search_ebook() - see
+# backends.py. resolve_goodreads_bookid also moved there (LLBackend._resolve_
+# goodreads_bookid) - it was purely an LL/GoodReads artifact for bridging an
+# Audible-sourced title to something LL's addBook can import; Shelfarr needs
+# no equivalent bridge step.
 
-def goodreads_to_result(item, existing_requests):
-    bookid = item.get("bookid")
-    already_have = ll_already_have(item.get("bookname", ""), item.get("authorname", ""), "ebook") in ("Open", "Have")
-    cover = item.get("bookimg")
-    if cover and not cover.startswith("http"):
-        cover = None
-    return {
-        "source_id": bookid,
-        "authorid": item.get("authorid"),
-        "language": (item.get("booklang") or "").strip().lower(),
-        "title": item.get("bookname", ""),
-        "subtitle": None,
-        "author": item.get("authorname", ""),
-        "narrator": None,
-        "cover": cover,
-        "release_date": item.get("bookdate") or "0000",
-        "already_have": already_have,
-        "request_status": existing_requests.get(bookid),
-    }
-
-
-def resolve_goodreads_bookid(title, author):
-    """Given a clean title/author (from an Audible result), find the matching
-    GoodReads bookid LL's backend can actually import - LL's addBook/addAuthorID
-    only understand GoodReads ids, not Audible ASINs."""
-    raw = ll_api("findBook", name=f"{title} {author}")
-    if not isinstance(raw, list) or not raw:
-        return None, None
-    best = max(raw, key=lambda r: r.get("highest_fuzz", 0))
-    if best.get("highest_fuzz", 0) < 55:
-        return None, None
-    return best.get("bookid"), best.get("authorid")
+def catalog_result_to_dict(result, existing_requests):
+    d = result.as_dict()
+    d["already_have"] = abs_already_have(d["title"], d["author"], "ebook")
+    d["request_status"] = existing_requests.get(d["source_id"])
+    return d
 
 
 # ---------- cover image proxy/cache ----------
@@ -536,8 +525,12 @@ def search(q: str, book_type: str = "audiobook", language: str = "english"):
             products = []
         results = [audible_to_result(p, existing_requests) for p in products]
     else:
-        raw = ll_api("findBook", name=q)
-        results = [goodreads_to_result(i, existing_requests) for i in raw] if isinstance(raw, list) else []
+        try:
+            raw_results = backend.search_ebook(q)
+        except Exception as e:
+            logger.warning(f"ebook search failed ({backend.name}): {e}")
+            raw_results = []
+        results = [catalog_result_to_dict(r, existing_requests) for r in raw_results]
         seen = set()
         deduped = []
         for r in results:
@@ -668,7 +661,7 @@ def _nyt_overview():
 
 def nyt_book_to_result(b, existing_requests, book_type):
     isbn = b.get("primary_isbn13", "")
-    already_have = ll_already_have(b.get("title", ""), b.get("author", ""), book_type) in ("Open", "Have")
+    already_have = abs_already_have(b.get("title", ""), b.get("author", ""), book_type)
     return {
         "source_id": isbn,
         "authorid": None,
@@ -757,171 +750,34 @@ def create_request(req: RequestIn):
 
     now = datetime.utcnow().isoformat()
 
-    if req.book_type == "audiobook" or req.needs_resolution:
-        ll_bookid, ll_authorid = resolve_goodreads_bookid(req.title, req.author)
-    else:
-        ll_bookid, ll_authorid = req.source_id, req.authorid
-
-    status = "submitted"
-    if not ll_bookid:
-        # record the request anyway so it's visible, but flag that LazyLibrarian
-        # couldn't find a matching catalog entry to actually search/download against
-        status = "unresolved"
-    else:
-        if ll_authorid:
-            try:
-                ll_api("addAuthorID", id=ll_authorid)
-            except Exception as e:
-                logger.warning(f"addAuthorID failed (continuing): {e}")
-        try:
-            ll_api("addBook", id=ll_bookid)
-        except Exception as e:
-            # The raw exception (connection refused, read timeout, etc) is
-            # genuinely alarming to a non-technical household member and
-            # reads as "the whole system is broken" - it's logged here for
-            # whoever's actually troubleshooting, but what the requester
-            # sees stays calm and actionable, since ll_api() already retried
-            # past anything momentary before giving up.
-            logger.error(f"addBook failed for LL book {ll_bookid}: {e}")
-            raise HTTPException(
-                503,
-                "LazyLibrarian is busy or briefly unreachable - your "
-                "request wasn't saved. Please try again in a minute.",
-            )
-
-        status_col = "AudioStatus" if req.book_type == "audiobook" else "Status"
-        other_type = "ebook" if req.book_type == "audiobook" else "audiobook"
-        other_status_col = "Status" if status_col == "AudioStatus" else "AudioStatus"
-
-        # LL defaults every newly-added book to Status=Skipped, AudioStatus=Wanted
-        # regardless of which format was actually requested. Left alone, that stray
-        # Wanted silently triggers a real search+download for a format nobody asked
-        # for (seen twice: an ebook request pulled down the audiobook edition
-        # instead). Only reset it if nobody else has a genuine active request for
-        # that other format on this book.
-        conn = get_local_db()
-        try:
-            other_active = conn.execute(
-                "SELECT 1 FROM requests WHERE ll_bookid=? AND book_type=? AND status NOT IN ('unresolved')",
-                (ll_bookid, other_type)
-            ).fetchone()
-        finally:
-            conn.close()
-
-        # addBook's import runs in a background thread on LL's side and can take a
-        # variable amount of time, especially when the book already has a partial
-        # record (eg. the other format already exists). Poll for the row to exist
-        # before we try to mark it Wanted, rather than a fixed sleep.
-        book_exists = False
-        for _ in range(15):
-            try:
-                conn = get_ll_db_readonly()
-                row = conn.execute("SELECT BookID FROM books WHERE BookID=?", (ll_bookid,)).fetchone()
-                conn.close()
-                if row:
-                    book_exists = True
-                    break
-            except Exception as e:
-                logger.warning(f"Polling for {ll_bookid} failed: {e}")
-            time.sleep(1)
-
-        # Not-out-yet books (preorders) get held at Skipped instead of Wanted -
-        # LL's own catalog scanner already uses this same convention for
-        # future-dated books it discovers on its own. poll_once() promotes it
-        # to Wanted automatically once the release date arrives, so there's
-        # nothing left to search for before a copy can possibly exist -
-        # every cycle spent searching for it before then is 100% wasted load
-        # against providers (ABB especially) with zero chance of a hit.
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        is_future_release = bool(req.release_date) and req.release_date != "0000" and req.release_date > today
-        target_status = "Skipped" if is_future_release else "Wanted"
-
-        def mark_wanted():
-            # Goes through LL's own queueBook/unqueueBook/setBookLock API commands
-            # instead of writing to lazylibrarian.db directly - a direct write from
-            # here once collided with LL's own concurrent writes and corrupted the
-            # database (see lazylibrarian-db-corruption-20260818.md). These commands
-            # run inside LL's own process against its own already-open connection,
-            # so there's no second writer to race.
-            api_type = "AudioBook" if status_col == "AudioStatus" else ""
-            if target_status == "Wanted":
-                ll_api("queueBook", id=ll_bookid, type=api_type)
-            # else: future release - leave at LL's own default Skipped, nothing to do
-
-            if not other_active:
-                # Only clear the other format if IT is currently Wanted - never
-                # stomp Have/Open/Snatched for a format the household already owns.
-                conn = get_ll_db_readonly()
-                try:
-                    row = conn.execute(
-                        f"SELECT {other_status_col} as st FROM books WHERE BookID=?", (ll_bookid,)
-                    ).fetchone()
-                finally:
-                    conn.close()
-                if row and row["st"] == "Wanted":
-                    other_api_type = "AudioBook" if other_status_col == "AudioStatus" else ""
-                    ll_api("unqueueBook", id=ll_bookid, type=other_api_type)
-
-            # Lock the book so LL's own author-refresh scan can't silently flip
-            # Status/AudioStatus back to its collection-pattern default - this is
-            # what was actually broken (an ebook request on an author this
-            # household mostly owns in audio kept reverting to AudioStatus=Wanted).
-            ll_api("setBookLock", id=ll_bookid)
-
-        if not book_exists:
-            logger.warning(f"{ll_bookid} never appeared in LL's DB after addBook - marking wanted anyway in case it lands late")
-        try:
-            mark_wanted()
-        except Exception as e:
-            logger.error(f"mark_wanted failed for LL book {ll_bookid}: {e}")
-            raise HTTPException(
-                503,
-                "LazyLibrarian is busy or briefly unreachable - your "
-                "request wasn't saved. Please try again in a minute.",
-            )
-
-        # addBook's import runs in a background thread on LL's own side (see
-        # LazyLibrarian's api.py _addonebook -> threading.Thread(...)) and for
-        # an author with a full catalog it can still be mid-flight tens of
-        # seconds after addBook already returned "OK" - well past setBookLock
-        # having landed, if that import reads this book's row before our lock
-        # write reaches the DB. A 6-second recheck window (the original
-        # design) wasn't long enough to catch that in practice - confirmed by
-        # a real request on an author with 22 books, where the correction
-        # never happened at all before the window closed. Run this in the
-        # background instead of blocking the user's request, so the window
-        # can be generous (a minute) without the "Requesting..." button
-        # sitting there the whole time.
-        def recheck_and_fix_drift():
-            for _ in range(20):
-                time.sleep(3)
-                try:
-                    conn = get_ll_db_readonly()
-                    row = conn.execute(
-                        f"SELECT {status_col} as st, {other_status_col} as ost FROM books WHERE BookID=?",
-                        (ll_bookid,)
-                    ).fetchone()
-                    conn.close()
-                    if row and (row["st"] != target_status or (not other_active and row["ost"] == "Wanted")):
-                        logger.info(f"{ll_bookid} status drifted (st={row['st']!r} ost={row['ost']!r}), re-applying")
-                        mark_wanted()
-                        if not is_future_release:
-                            try:
-                                ll_api("searchBook", id=ll_bookid)
-                            except Exception as e:
-                                logger.warning(f"searchBook retrigger after drift-fix failed for {ll_bookid}: {e}")
-                except Exception as e:
-                    logger.warning(f"Post-check for {ll_bookid} failed: {e}")
-
-        threading.Thread(target=recheck_and_fix_drift, daemon=True).start()
-
-        if is_future_release:
-            logger.info(f"{ll_bookid} not out until {req.release_date}, holding at Skipped instead of searching now")
-        else:
-            try:
-                ll_api("searchBook", id=ll_bookid)
-            except Exception as e:
-                logger.warning(f"searchBook trigger failed (will pick up on next scheduled search): {e}")
+    # Everything backend-specific - resolving a catalog id, adding the book,
+    # marking it wanted (or holding a preorder), locking/dual-format
+    # clearing where the backend needs that, triggering a search - happens
+    # inside backend.submit(). See backends.py: LLBackend does exactly what
+    # this function used to do inline; ShelfarrBackend's model needs none
+    # of the locking/drift-correction machinery LL's does.
+    try:
+        result = backend.submit(
+            title=req.title,
+            author=req.author,
+            book_type=req.book_type,
+            source_id=req.source_id,
+            authorid=req.authorid,
+            release_date=req.release_date,
+            needs_resolution=req.needs_resolution,
+        )
+    except Exception as e:
+        # The raw exception (connection refused, read timeout, etc) is
+        # genuinely alarming to a non-technical household member and reads
+        # as "the whole system is broken" - logged here for whoever's
+        # actually troubleshooting, but what the requester sees stays calm
+        # and actionable.
+        logger.error(f"{backend.name} submit failed for {req.title!r}: {e}")
+        raise HTTPException(
+            503,
+            f"{backend.name.capitalize()} is busy or briefly unreachable - "
+            "your request wasn't saved. Please try again in a minute.",
+        )
 
     conn = get_local_db()
     try:
@@ -930,12 +786,12 @@ def create_request(req: RequestIn):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id, book_type) DO UPDATE SET
                 requester=excluded.requester, updated_at=excluded.updated_at
-        """, (req.requester, req.book_type, req.source_id, ll_bookid, ll_authorid, req.title, req.author,
-              req.cover, req.release_date, status, now, now))
+        """, (req.requester, req.book_type, req.source_id, result.backend_ref, req.authorid, req.title, req.author,
+              req.cover, req.release_date, result.status, now, now))
         conn.commit()
     finally:
         conn.close()
-    return {"ok": True, "resolved": bool(ll_bookid)}
+    return {"ok": True, "resolved": result.resolved}
 
 
 @app.get("/api/my-requests")
@@ -991,16 +847,24 @@ def _qbit_delete(hashes, delete_files=True):
         return False
 
 
+# Both backends' download-client categories - LL's downloads use "audiobooks"
+# (unchanged), Shelfarr's use "shelfarr" (see qbt_audiobook_queue_triage in
+# homelab-memory for the matching Unraid-side cleanup cron, which handles
+# early-stage priority/purge on a faster cadence than these two - this pair
+# handles the later "fully done, still seeding" and "long-dead" cases).
+BOOK_CATEGORIES = {"audiobooks", "shelfarr"}
+
+
 def archive_old_downloads(torrents):
-    """LL copies finished downloads into the real library, but leaves the original
-    seeding in qBittorrent forever. Once there are more than KEEP_SEEDING_COUNT
-    finished book torrents, remove the oldest ones from qBittorrent (their data is
-    already safely duplicated in the library) so the client doesn't accumulate
-    indefinitely."""
+    """The backend copies finished downloads into the real library, but
+    leaves the original seeding in qBittorrent forever. Once there are more
+    than KEEP_SEEDING_COUNT finished book torrents, remove the oldest ones
+    from qBittorrent (their data is already safely duplicated in the
+    library) so the client doesn't accumulate indefinitely."""
     now = time.time()
     done = [
         (h, t) for h, t in torrents.items()
-        if t.get("category") == "audiobooks"
+        if t.get("category") in BOOK_CATEGORIES
         and (t.get("progress") or 0) >= 1.0
         and t.get("state") in DONE_STATES
     ]
@@ -1021,12 +885,12 @@ def cleanup_stale_torrents(torrents):
     """Find book torrents that have been sitting at ~0% for STALE_MIN_AGE_SECONDS
     with no seeders right now either - genuinely abandoned, not just a temporary
     dry spell. Remove the dead torrent and reset the matching request's status
-    back to Wanted so LL's normal search cycle tries again (possibly finding a
-    different, live release) instead of leaving it stuck forever."""
+    back to Wanted so the backend's normal search cycle tries again (possibly
+    finding a different, live release) instead of leaving it stuck forever."""
     now = time.time()
     stale = [
         (h, t) for h, t in torrents.items()
-        if t.get("category") == "audiobooks"
+        if t.get("category") in BOOK_CATEGORIES
         and (t.get("progress") or 0) < STALE_PROGRESS_CEILING
         and (t.get("num_seeds") or 0) == 0
         and now - (t.get("added_on") or now) > STALE_MIN_AGE_SECONDS
@@ -1049,10 +913,8 @@ def cleanup_stale_torrents(torrents):
             score = _word_overlap(target_words, r["title"])
             if score > 0.5 and r["ll_bookid"]:
                 try:
-                    status_col = "AudioStatus" if r["book_type"] == "audiobook" else "Status"
-                    api_type = "AudioBook" if status_col == "AudioStatus" else ""
-                    ll_api("queueBook", id=r["ll_bookid"], type=api_type)
-                    logger.info(f"Stale torrent for '{r['title']}' (0 seeds, {STALE_MIN_AGE_SECONDS // 86400}+ days at ~0%) - reset to Wanted for retry")
+                    backend.reset_wanted(r["ll_bookid"], r["book_type"])
+                    logger.info(f"Stale torrent for '{r['title']}' (0 seeds, {STALE_MIN_AGE_SECONDS // 86400}+ days at ~0%) - reset for retry")
                 except Exception as e:
                     logger.warning(f"Failed to reset stale request {r['id']}: {e}")
                 break
@@ -1090,40 +952,14 @@ def poll_once():
     if not rows:
         return
 
-    # Promote preorders held at Skipped (see create_request) to Wanted once
-    # their release date actually arrives, so LL's normal search cron picks
-    # them up starting exactly then - not before (nothing to find) and not
-    # stuck waiting on a manual nudge after release either.
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    due = [r for r in rows if r["status"] == "submitted" and r["ll_bookid"]
-           and r["release_date"] and r["release_date"] != "0000" and r["release_date"] <= today]
-    if due:
-        try:
-            conn_ll_ro = get_ll_db_readonly()
-            try:
-                for r in due:
-                    status_col = "AudioStatus" if r["book_type"] == "audiobook" else "Status"
-                    cur = conn_ll_ro.execute(
-                        f"SELECT {status_col} as st FROM books WHERE BookID=?", (r["ll_bookid"],)
-                    ).fetchone()
-                    if cur and cur["st"] == "Skipped":
-                        api_type = "AudioBook" if status_col == "AudioStatus" else ""
-                        ll_api("queueBook", id=r["ll_bookid"], type=api_type)
-                        logger.info(f"{r['ll_bookid']} ({r['title']}) released {r['release_date']}, promoting Skipped -> Wanted")
-                        try:
-                            ll_api("searchBook", id=r["ll_bookid"])
-                        except Exception as e:
-                            logger.warning(f"searchBook trigger failed for newly-released {r['ll_bookid']} (will pick up on next scheduled search): {e}")
-            finally:
-                conn_ll_ro.close()
-        except Exception as e:
-            logger.warning(f"preorder promotion check failed: {e}")
-
+    # Backend-specific maintenance (LL: promote preorders held at Skipped
+    # once their release date arrives, so its normal search cron picks
+    # them up starting exactly then; Shelfarr: no-op, its own recurring
+    # jobs already handle this).
     try:
-        conn_ll = get_ll_db_readonly()
+        backend.poll_maintenance(rows)
     except Exception as e:
-        logger.warning(f"poll: could not open LL db: {e}")
-        conn_ll = None
+        logger.warning(f"backend poll_maintenance failed: {e}")
 
     status_updates = []
     health_updates = []
@@ -1139,25 +975,15 @@ def poll_once():
         qbit_torrents, sab_queue, sab_history = {}, [], []
 
     for r in rows:
-        # 1. status against LL's own db (Wanted/Snatched/Open)
-        if conn_ll and r["ll_bookid"]:
+        # 1. status against the backend's own catalog (Wanted/Snatched/Downloaded)
+        if r["ll_bookid"]:
             try:
-                row = conn_ll.execute(
-                    "SELECT Status, AudioStatus FROM books WHERE BookID=?", (r["ll_bookid"],)
-                ).fetchone()
+                new_status = backend.get_status(r["ll_bookid"], r["book_type"])
             except Exception as e:
-                logger.warning(f"poll: LL lookup failed for {r['ll_bookid']}: {e}")
-                row = None
-            if row:
-                ll_status = row["AudioStatus"] if r["book_type"] == "audiobook" else row["Status"]
-                new_status = {
-                    "Wanted": "wanted",
-                    "Snatched": "snatched",
-                    "Open": "downloaded",
-                    "Have": "downloaded",
-                }.get(ll_status)
-                if new_status and new_status != r["status"]:
-                    status_updates.append((new_status, r["id"]))
+                logger.warning(f"poll: {backend.name} lookup failed for {r['ll_bookid']}: {e}")
+                new_status = None
+            if new_status and new_status != r["status"]:
+                status_updates.append((new_status, r["id"]))
 
         # 2. real download progress from qbit/sab - only worth checking once
         # something's actually been sent to a downloader (wanted or snatched)
@@ -1171,9 +997,6 @@ def poll_once():
                 health_updates.append((health["progress"], health["health"], now, r["id"]))
             else:
                 health_updates.append((0, "sending", now, r["id"]))
-
-    if conn_ll:
-        conn_ll.close()
 
     if status_updates or health_updates:
         conn_local = get_local_db()
