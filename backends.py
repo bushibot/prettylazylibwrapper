@@ -29,7 +29,7 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 
@@ -549,11 +549,51 @@ class ShelfarrBackend(Backend):
         # equivalent (re-triggers its own SearchJob for the request).
         self.retry_search(backend_ref, book_type)
 
+    # How long a request can sit in a terminal not_found/failed state
+    # before this treats it as worth retrying rather than truly dead.
+    # Confirmed via a real test (scalable-greeting-pike.md) that Shelfarr's
+    # own recurring jobs do NOT retry this on their own - a single
+    # transient Prowlarr timeout is enough to strand a request forever,
+    # unlike LazyLibrarian which re-searches every Wanted book on its own
+    # cron regardless of why the last attempt failed. 6h is arbitrary but
+    # deliberately not aggressive - retrying too often just re-hammers the
+    # same indexers that likely timed out in the first place.
+    STALE_RETRY_HOURS = 6
+
     def poll_maintenance(self, pending_rows):
-        # Shelfarr's own recurring jobs (request_queue, etc.) already
-        # handle its side of preorder/queue maintenance internally -
-        # nothing for this app to do here.
-        return
+        """Shelfarr's own recurring jobs (request_queue, etc.) handle most
+        upkeep, but leave one real gap: a request that lands in
+        not_found/failed (e.g. from a transient Prowlarr timeout) just
+        stays that way forever with no further search attempt. This closes
+        that loop - re-triggers a search for anything stuck there past
+        STALE_RETRY_HOURS. Shelfarr's own `updated_at` is the backoff
+        clock: a retry bumps it, so a given request can't get retried more
+        than once per window even across many poll cycles."""
+        cutoff = datetime.utcnow() - timedelta(hours=self.STALE_RETRY_HOURS)
+        for row in pending_rows:
+            backend_ref = row["ll_bookid"]
+            if not backend_ref:
+                continue
+            try:
+                data = self._api("GET", f"requests/{backend_ref}")
+            except Exception as e:
+                logger.warning(f"poll_maintenance: Shelfarr lookup failed for {backend_ref}: {e}")
+                continue
+            if data.get("status") not in ("not_found", "failed"):
+                continue
+            updated_at = data.get("updated_at")
+            if not updated_at:
+                continue
+            try:
+                updated_dt = datetime.strptime(updated_at[:19], "%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                continue
+            if updated_dt < cutoff:
+                logger.info(
+                    f"Shelfarr request {backend_ref} ('{row['title']}') stuck at "
+                    f"'{data.get('status')}' for {self.STALE_RETRY_HOURS}+h - retrying"
+                )
+                self.retry_search(backend_ref, row["book_type"])
 
     def already_have(self, title, author, book_type):
         # Superseded by abs_already_have() in app.py - not used.
