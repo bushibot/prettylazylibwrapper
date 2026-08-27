@@ -144,6 +144,30 @@
     display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 0.72rem;
     background: var(--bg-card); border: 1px solid var(--border); color: var(--text-dim);
   }
+  .mini-toggle { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .mini-toggle button {
+    background: var(--bg-card); border: none; color: var(--text-dim); padding: 0 18px;
+    cursor: pointer; font-size: 0.9rem;
+  }
+  .mini-toggle button.active { background: var(--accent); color: white; }
+  .follow-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 8px; margin-bottom: 8px;
+  }
+  .follow-name { font-weight: 600; font-size: 0.92rem; }
+  .follow-meta { color: var(--text-dim); font-size: 0.78rem; margin-top: 2px; }
+  .follow-unfollow {
+    background: none; border: 1px solid var(--border); color: var(--text-dim);
+    padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; white-space: nowrap;
+  }
+  .follow-unfollow:hover { color: var(--red); border-color: var(--red); }
+  .follow-link {
+    margin-top: 4px; width: 100%; padding: 6px; border-radius: 6px; border: 1px solid var(--border);
+    background: none; color: var(--text-dim); font-size: 0.72rem; cursor: pointer;
+  }
+  .follow-link:hover { color: var(--accent); border-color: var(--accent); }
+  .follow-link:disabled { opacity: 0.6; cursor: default; }
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 100;
     display: flex; align-items: center; justify-content: center; padding: 20px;
@@ -174,6 +198,7 @@
   <nav>
     <button id="nav-search" class="active">Search</button>
     <button id="nav-mine">Requests</button>
+    <button id="nav-follows">Follows</button>
   </nav>
   <div class="spacer"></div>
   <a href="/config" title="Settings"
@@ -236,6 +261,21 @@
   <div id="view-mine" style="display:none">
     <div id="mine-table"></div>
   </div>
+
+  <div id="view-follows" style="display:none">
+    <div class="search-row">
+      <input type="text" id="follow-input" placeholder="Author or series name...">
+      <div class="mini-toggle" id="follow-type-toggle">
+        <button class="active" data-type="author">Author</button>
+        <button data-type="series">Series</button>
+      </div>
+      <button class="req-btn" id="follow-submit" style="width:auto;padding:0 20px">Follow</button>
+    </div>
+    <div class="section-title">Followed Authors</div>
+    <div id="follows-authors-list"><div class="loading">Loading...</div></div>
+    <div class="section-title">Followed Series</div>
+    <div id="follows-series-list"><div class="loading">Loading...</div></div>
+  </div>
 </main>
 
 <script>
@@ -291,6 +331,12 @@ function renderCard(item) {
     btn = `<button class="req-btn" onclick='openRequestModal(${JSON.stringify(item).replace(/'/g, "&apos;")})'>Request</button>`;
   }
 
+  // The watch-list is audiobook-only (Audible-backed, same as this app's
+  // audiobook search) - only offer it where it'll actually work.
+  const followBtn = (currentType === "audiobook" && item.author && item.author !== "Unknown")
+    ? `<button class="follow-link" onclick="quickFollowAuthor('${item.author.replace(/'/g, "\\'")}', this)">+ Follow ${item.author}</button>`
+    : "";
+
   return `
     <div class="card" data-source-id="${item.source_id}">
       <div class="cover-wrap">${coverImg(item.cover, item.title)}${badge}</div>
@@ -299,8 +345,30 @@ function renderCard(item) {
         <div class="card-author">${item.author}${item.narrator ? ` &middot; read by ${item.narrator}` : ""}</div>
         <div class="card-date">${item.release_date && item.release_date !== "0000" ? item.release_date : "Release date unknown"}</div>
         ${btn}
+        ${followBtn}
       </div>
     </div>`;
+}
+
+function currentFollowRequester() {
+  const picker = document.getElementById("user-picker").value;
+  return picker === "All" ? "Everyone" : picker;
+}
+
+async function quickFollowAuthor(authorName, btnEl) {
+  btnEl.disabled = true;
+  btnEl.textContent = "Following...";
+  try {
+    const r = await fetch(`${API}/api/follow-author`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name: authorName, requester: currentFollowRequester()}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    btnEl.textContent = "Following ✓";
+  } catch (e) {
+    btnEl.disabled = false;
+    btnEl.textContent = `+ Follow ${authorName}`;
+  }
 }
 
 let ebookDiscoverLoaded = false;
@@ -563,21 +631,92 @@ document.querySelectorAll(".type-toggle button").forEach(btn => {
 
 let mineRefreshTimer = null;
 
-document.getElementById("nav-search").addEventListener("click", () => {
-  document.getElementById("nav-search").classList.add("active");
-  document.getElementById("nav-mine").classList.remove("active");
-  document.getElementById("view-search").style.display = "block";
-  document.getElementById("view-mine").style.display = "none";
+function showView(name) {
+  document.getElementById("nav-search").classList.toggle("active", name === "search");
+  document.getElementById("nav-mine").classList.toggle("active", name === "mine");
+  document.getElementById("nav-follows").classList.toggle("active", name === "follows");
+  document.getElementById("view-search").style.display = name === "search" ? "block" : "none";
+  document.getElementById("view-mine").style.display = name === "mine" ? "block" : "none";
+  document.getElementById("view-follows").style.display = name === "follows" ? "block" : "none";
   clearInterval(mineRefreshTimer);
-});
+}
+
+document.getElementById("nav-search").addEventListener("click", () => showView("search"));
 document.getElementById("nav-mine").addEventListener("click", () => {
-  document.getElementById("nav-mine").classList.add("active");
-  document.getElementById("nav-search").classList.remove("active");
-  document.getElementById("view-search").style.display = "none";
-  document.getElementById("view-mine").style.display = "block";
+  showView("mine");
   loadMine();
-  clearInterval(mineRefreshTimer);
   mineRefreshTimer = setInterval(loadMine, 30000);  // matches backend poll cadence closely enough to feel live
+});
+document.getElementById("nav-follows").addEventListener("click", () => {
+  showView("follows");
+  loadFollows();
+});
+
+function followRow(f, kind) {
+  const name = kind === "author" ? f.author_name : f.series_name;
+  const checked = f.last_checked_at ? `Last checked ${new Date(f.last_checked_at).toLocaleDateString()}` : "Not checked yet";
+  return `
+    <div class="follow-row">
+      <div>
+        <div class="follow-name">${name}</div>
+        <div class="follow-meta">Followed by ${f.followed_by} &middot; ${checked}</div>
+      </div>
+      <button class="follow-unfollow" onclick="unfollow(${f.id}, '${kind}')">Unfollow</button>
+    </div>`;
+}
+
+async function unfollow(id, kind) {
+  await fetch(`${API}/api/follow-${kind}/${id}`, { method: "DELETE" });
+  loadFollows();
+}
+
+async function loadFollows() {
+  const aEl = document.getElementById("follows-authors-list");
+  const sEl = document.getElementById("follows-series-list");
+  let data;
+  try {
+    data = await fetch(`${API}/api/follows`).then(r => r.json());
+  } catch (e) {
+    aEl.innerHTML = sEl.innerHTML = `<div class="empty">Couldn't load follows right now.</div>`;
+    return;
+  }
+  aEl.innerHTML = data.authors.length ? data.authors.map(f => followRow(f, "author")).join("")
+    : `<div class="empty">No followed authors yet - new releases won't be auto-requested until you follow someone.</div>`;
+  sEl.innerHTML = data.series.length ? data.series.map(f => followRow(f, "series")).join("")
+    : `<div class="empty">No followed series yet.</div>`;
+}
+
+let followType = "author";
+document.querySelectorAll("#follow-type-toggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll("#follow-type-toggle button").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    followType = btn.dataset.type;
+  });
+});
+
+document.getElementById("follow-submit").addEventListener("click", async () => {
+  const input = document.getElementById("follow-input");
+  const name = input.value.trim();
+  if (!name) return;
+  const btn = document.getElementById("follow-submit");
+  btn.disabled = true;
+  try {
+    const r = await fetch(`${API}/api/follow-${followType}`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name, requester: currentFollowRequester()}),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    input.value = "";
+    loadFollows();
+  } catch (e) {
+    alert("Follow failed: " + e.message);
+  } finally {
+    btn.disabled = false;
+  }
+});
+document.getElementById("follow-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") document.getElementById("follow-submit").click();
 });
 
 document.getElementById("genre-picker").addEventListener("change", loadDiscover);

@@ -26,6 +26,8 @@ SETTING_FIELDS = [
     ("ABB_PROXY_URL", "HTTP proxy for reaching AudioBookBay (e.g. http://host:port) - some ISPs block it directly, leave blank to connect direct", False, ""),
     ("NYT_API_KEY", "NYT Books API key, used for the ebook New Releases browse (developer.nytimes.com)", True, ""),
     ("ABB_MIN_REQUEST_INTERVAL", "Minimum seconds between requests to AudioBookBay - a single LL search can trigger several (one per result, for detail pages), and a 15-min cron pass searches every wanted book, so bursts add up fast. Raise this if you keep getting rate-limited/blocked.", False, "3"),
+    ("WATCHLIST_CHECK_INTERVAL_HOURS", "How often the author/series watch-list re-checks Audible for new releases", False, "24"),
+    ("WATCHLIST_MAX_NEW_PER_ITEM", "Safety cap: max new audiobooks auto-requested per followed author/series in a single check pass. Prevents a newly-followed author (or a big backlog) from flooding the download queue in one go - see lazylibrarian-duplicate-books-20260822.md for why this matters.", False, "5"),
 ]
 
 

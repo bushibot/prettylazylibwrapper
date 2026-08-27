@@ -79,6 +79,32 @@ def init_local_db():
     # rows created before the backend column existed all came from LL - the
     # only backend that existed at the time - so that's the correct backfill
     conn.execute("UPDATE requests SET backend='lazylibrarian' WHERE backend IS NULL")
+
+    # Author/series watch-list - replaces LL's AUTHORUPDATE/SERIESUPDATE/
+    # SEARCHALLBOOKS monitoring, backend-agnostic (goes through
+    # create_request() -> whichever Backend is live, same as a manual
+    # request). One row per followed author/series, household-wide (not
+    # per-user) - `followed_by` is just attribution for who added it.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS followed_authors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            author_name TEXT NOT NULL COLLATE NOCASE,
+            followed_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_checked_at TEXT,
+            UNIQUE(author_name)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS followed_series (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            series_name TEXT NOT NULL COLLATE NOCASE,
+            followed_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            last_checked_at TEXT,
+            UNIQUE(series_name)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -487,6 +513,8 @@ def startup():
     init_settings_db()
     t = threading.Thread(target=status_poll_loop, daemon=True)
     t.start()
+    w = threading.Thread(target=watchlist_loop, daemon=True)
+    w.start()
 
 
 @app.get("/api/users")
@@ -836,6 +864,263 @@ def all_requests():
     finally:
         conn.close()
     return [dict(r) for r in rows]
+
+
+# ---------- author/series watch-list ----------
+# Replaces LL's AUTHORUPDATE/SERIESUPDATE/SEARCHALLBOOKS jobs. Audiobook-only
+# (Audible is already the backend-agnostic audiobook source of truth this
+# app uses everywhere else) - deliberately not extended to ebooks, since LL
+# monitored at the author level primarily and that's the actual gap being
+# replaced. Goes through create_request() -> whichever Backend is live, so
+# a followed author's new release lands exactly like a manual request would.
+
+class FollowIn(BaseModel):
+    name: str
+    requester: str
+
+
+@app.get("/api/follows")
+def list_follows():
+    conn = get_local_db()
+    try:
+        authors = conn.execute("SELECT * FROM followed_authors ORDER BY author_name").fetchall()
+        series = conn.execute("SELECT * FROM followed_series ORDER BY series_name").fetchall()
+    finally:
+        conn.close()
+    return {"authors": [dict(r) for r in authors], "series": [dict(r) for r in series]}
+
+
+@app.post("/api/follow-author")
+def follow_author(body: FollowIn):
+    if body.requester not in get_users() and body.requester != EVERYONE_TAG:
+        raise HTTPException(400, "Unknown requester")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "author name required")
+    conn = get_local_db()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO followed_authors (author_name, followed_by, created_at) VALUES (?, ?, ?)",
+            (name, body.requester, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM followed_authors WHERE author_name=?", (name,)).fetchone()
+    finally:
+        conn.close()
+    # immediate feedback rather than waiting up to WATCHLIST_CHECK_INTERVAL_HOURS -
+    # mirrors LL's own behavior of scanning an author's catalog right when added
+    threading.Thread(target=_watchlist_check_author, args=(name, body.requester), daemon=True).start()
+    return dict(row)
+
+
+@app.delete("/api/follow-author/{follow_id}")
+def unfollow_author(follow_id: int):
+    conn = get_local_db()
+    try:
+        conn.execute("DELETE FROM followed_authors WHERE id=?", (follow_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/follow-series")
+def follow_series(body: FollowIn):
+    if body.requester not in get_users() and body.requester != EVERYONE_TAG:
+        raise HTTPException(400, "Unknown requester")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "series name required")
+    conn = get_local_db()
+    try:
+        conn.execute(
+            "INSERT OR IGNORE INTO followed_series (series_name, followed_by, created_at) VALUES (?, ?, ?)",
+            (name, body.requester, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM followed_series WHERE series_name=?", (name,)).fetchone()
+    finally:
+        conn.close()
+    threading.Thread(target=_watchlist_check_series, args=(name, body.requester), daemon=True).start()
+    return dict(row)
+
+
+@app.delete("/api/follow-series/{follow_id}")
+def unfollow_series(follow_id: int):
+    conn = get_local_db()
+    try:
+        conn.execute("DELETE FROM followed_series WHERE id=?", (follow_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}
+
+
+def _existing_audiobook_source_ids():
+    conn = get_local_db()
+    try:
+        return {r["source_id"] for r in conn.execute("SELECT source_id FROM requests WHERE book_type='audiobook'")}
+    finally:
+        conn.close()
+
+
+def _watchlist_process_products(products, match_author, requester, existing_source_ids):
+    """Diffs a batch of Audible products against what's already requested/
+    owned and auto-requests anything genuinely new, capped per call by
+    WATCHLIST_MAX_NEW_PER_ITEM. Returns how many were actually requested."""
+    try:
+        cap = int(cfg.WATCHLIST_MAX_NEW_PER_ITEM)
+    except (TypeError, ValueError):
+        cap = 5
+    requested = 0
+    for p in products:
+        if requested >= cap:
+            logger.warning(f"watchlist: hit the {cap}-per-pass cap for this item - remaining new titles will be picked up on a later check")
+            break
+        asin = p.get("asin")
+        if not asin or asin in existing_source_ids:
+            continue
+        authors = p.get("authors", [])
+        author_name = authors[0]["name"] if authors else "Unknown"
+        if match_author and normalize(author_name) != normalize(match_author):
+            # Audible's author-keyword search can surface loosely-related
+            # results (anthologies, "read-alikes") - keep this tight so a
+            # follow only ever pulls in that author's own actual books.
+            continue
+        title = p.get("title", "")
+        if not title or abs_already_have(title, author_name, "audiobook"):
+            continue
+        images = p.get("product_images", {})
+        cover = images.get("500") or images.get("1000") or images.get("300")
+        pub = p.get("publication_datetime", "") or ""
+        release_date = pub.split("T")[0] if pub else "0000"
+        try:
+            create_request(RequestIn(
+                requester=requester, book_type="audiobook", source_id=asin,
+                title=title, author=author_name, cover=cover, release_date=release_date,
+            ))
+            existing_source_ids.add(asin)
+            requested += 1
+            logger.info(f"watchlist: auto-requested '{title}' by {author_name} (followed by {requester})")
+        except Exception as e:
+            logger.warning(f"watchlist auto-request failed for {title!r}: {e}")
+    return requested
+
+
+def _watchlist_check_author(author_name, requester, existing_source_ids=None):
+    if existing_source_ids is None:
+        existing_source_ids = _existing_audiobook_source_ids()
+    try:
+        products = audible_search(author=author_name, num_results=50)
+    except Exception as e:
+        logger.warning(f"watchlist check failed for author {author_name!r}: {e}")
+        return
+    _watchlist_process_products(products, author_name, requester, existing_source_ids)
+
+
+def _watchlist_check_series(series_name, requester, existing_source_ids=None):
+    if existing_source_ids is None:
+        existing_source_ids = _existing_audiobook_source_ids()
+    try:
+        # Audible has no first-class series query - keywords is the closest
+        # available proxy, so this is deliberately looser than the
+        # author-follow path (no author-match filter, since the series name
+        # itself is the signal here).
+        products = audible_search(keywords=series_name, num_results=50)
+    except Exception as e:
+        logger.warning(f"watchlist check failed for series {series_name!r}: {e}")
+        return
+    _watchlist_process_products(products, None, requester, existing_source_ids)
+
+
+def watchlist_check_once():
+    conn = get_local_db()
+    try:
+        authors = conn.execute("SELECT * FROM followed_authors").fetchall()
+        series = conn.execute("SELECT * FROM followed_series").fetchall()
+    finally:
+        conn.close()
+    if not authors and not series:
+        return
+
+    existing_source_ids = _existing_audiobook_source_ids()
+    now = datetime.utcnow().isoformat()
+    conn = get_local_db()
+    try:
+        for a in authors:
+            _watchlist_check_author(a["author_name"], a["followed_by"], existing_source_ids)
+            conn.execute("UPDATE followed_authors SET last_checked_at=? WHERE id=?", (now, a["id"]))
+            conn.commit()
+            time.sleep(2)  # gentle pacing against Audible, mirrors ABB_MIN_REQUEST_INTERVAL's intent
+        for s in series:
+            _watchlist_check_series(s["series_name"], s["followed_by"], existing_source_ids)
+            conn.execute("UPDATE followed_series SET last_checked_at=? WHERE id=?", (now, s["id"]))
+            conn.commit()
+            time.sleep(2)
+    finally:
+        conn.close()
+
+
+def watchlist_loop():
+    time.sleep(300)  # let the container finish settling before the first pass
+    while True:
+        try:
+            watchlist_check_once()
+        except Exception as e:
+            logger.warning(f"watchlist check error: {e}")
+        try:
+            hours = float(cfg.WATCHLIST_CHECK_INTERVAL_HOURS)
+        except (TypeError, ValueError):
+            hours = 24
+        time.sleep(max(hours, 1) * 3600)
+
+
+@app.post("/api/follows/check-now")
+def watchlist_check_now():
+    """Manual trigger, mainly for verifying the watch-list actually works
+    without waiting up to WATCHLIST_CHECK_INTERVAL_HOURS."""
+    t = threading.Thread(target=watchlist_check_once, daemon=True)
+    t.start()
+    return {"ok": True, "note": "check running in the background - refresh Requests shortly"}
+
+
+@app.post("/api/follows/seed-from-ll")
+def seed_follows_from_ll():
+    """One-time import of LL's currently-Active authors into the
+    watch-list, so nobody has to manually re-follow what they already
+    follow today. Deliberately does NOT trigger a check pass itself - with
+    97 authors, an immediate scan could auto-request a large batch of
+    already-known-but-not-yet-owned titles all at once (see
+    lazylibrarian-duplicate-books-20260822.md, the exact incident this
+    caution is modeled on). Run /api/follows/check-now (or wait for the
+    next scheduled pass) once ready to actually let it search, ideally
+    after reviewing how many authors this actually seeded."""
+    try:
+        conn_ll = sqlite3.connect(f"file:{LL_DB_PATH}?mode=ro", uri=True, timeout=5)
+        conn_ll.row_factory = sqlite3.Row
+        rows = conn_ll.execute("SELECT AuthorName FROM authors WHERE Status='Active'").fetchall()
+        conn_ll.close()
+    except Exception as e:
+        raise HTTPException(503, f"couldn't read LazyLibrarian's author list: {e}")
+
+    now = datetime.utcnow().isoformat()
+    conn = get_local_db()
+    added = 0
+    try:
+        for r in rows:
+            name = (r["AuthorName"] or "").strip()
+            if not name:
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO followed_authors (author_name, followed_by, created_at) VALUES (?, ?, ?)",
+                (name, EVERYONE_TAG, now),
+            )
+            if cur.rowcount:
+                added += 1
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True, "ll_active_authors": len(rows), "newly_followed": added}
 
 
 KEEP_SEEDING_COUNT = 20
