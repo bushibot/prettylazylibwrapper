@@ -28,6 +28,11 @@ SETTING_FIELDS = [
     ("ABB_MIN_REQUEST_INTERVAL", "Minimum seconds between requests to AudioBookBay - a single LL search can trigger several (one per result, for detail pages), and a 15-min cron pass searches every wanted book, so bursts add up fast. Raise this if you keep getting rate-limited/blocked.", False, "3"),
     ("WATCHLIST_CHECK_INTERVAL_HOURS", "How often the author/series watch-list re-checks Audible for new releases", False, "24"),
     ("WATCHLIST_MAX_NEW_PER_ITEM", "Safety cap: max new audiobooks auto-requested per followed author/series in a single check pass. Prevents a newly-followed author (or a big backlog) from flooding the download queue in one go - see lazylibrarian-duplicate-books-20260822.md for why this matters.", False, "5"),
+    ("SMTP_HOST", "SMTP server for request-completion emails, e.g. smtp.gmail.com", False, ""),
+    ("SMTP_PORT", "SMTP port (587 for STARTTLS, standard for Gmail and most providers)", False, "587"),
+    ("SMTP_USER", "SMTP username / from-address", False, ""),
+    ("SMTP_PASS", "SMTP password or app password", True, ""),
+    ("USER_EMAILS", "Who gets emailed when their own request finishes downloading, as 'Name:email,Name:email' - only listed users get notified; requests made as 'Everyone' are never emailed to anyone", False, ""),
 ]
 
 
@@ -72,6 +77,22 @@ def get_users():
 
 def set_users(users_list):
     set_setting("USERS", ",".join(u.strip() for u in users_list if u.strip()))
+
+
+def get_user_emails():
+    """Parses USER_EMAILS ('Name:email,Name:email') into a dict. Only users
+    with an email set here get completion notifications - this is separate
+    from USERS so household members can opt out just by not being listed."""
+    raw = get_setting("USER_EMAILS", "")
+    result = {}
+    for pair in raw.split(","):
+        if ":" not in pair:
+            continue
+        name, email = pair.split(":", 1)
+        name, email = name.strip(), email.strip()
+        if name and email:
+            result[name] = email
+    return result
 
 
 class LiveConfig:

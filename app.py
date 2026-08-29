@@ -2,12 +2,14 @@ import hashlib
 import ipaddress
 import os
 import re
+import smtplib
 import socket
 import sqlite3
 import time
 import threading
 import logging
 from datetime import datetime, timedelta
+from email.mime.text import MIMEText
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -19,7 +21,7 @@ from pydantic import BaseModel
 
 from settings import (
     cfg, init_settings_db, get_users, set_users, set_setting,
-    get_all_settings_masked, SETTING_FIELDS,
+    get_all_settings_masked, SETTING_FIELDS, get_user_emails,
 )
 from abb_bridge import app as abb_app
 from backends import get_backend, get_backend_by_name
@@ -1261,11 +1263,44 @@ def status_poll_loop():
         time.sleep(90)  # sync/maindata is a cheap delta fetch, so this can run closer to real-time
 
 
+def send_completion_email(requester, title, author, book_type):
+    """Best-effort - a household member only gets emailed if they're listed
+    in USER_EMAILS. Requests made as 'Everyone' are skipped: per-requester
+    notification has no single target for a shared request."""
+    if requester == EVERYONE_TAG:
+        return
+    to_addr = get_user_emails().get(requester)
+    if not to_addr:
+        return
+    host, user, password = cfg.SMTP_HOST, cfg.SMTP_USER, cfg.SMTP_PASS
+    if not (host and user and password):
+        return
+    try:
+        port = int(cfg.SMTP_PORT)
+    except (TypeError, ValueError):
+        port = 587
+
+    kind = "audiobook" if book_type == "audiobook" else "ebook"
+    msg = MIMEText(
+        f'Your {kind} request "{title}" by {author} has finished downloading '
+        "and should show up in Audiobookshelf shortly."
+    )
+    msg["Subject"] = f'"{title}" is ready'
+    msg["From"] = user
+    msg["To"] = to_addr
+
+    with smtplib.SMTP(host, port, timeout=15) as server:
+        server.starttls()
+        server.login(user, password)
+        server.send_message(msg)
+    logger.info(f"completion email sent to {requester} <{to_addr}> for {title!r}")
+
+
 def poll_once():
     conn_local = get_local_db()
     try:
         rows = conn_local.execute(
-            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend FROM requests "
+            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend, requester FROM requests "
             "WHERE status NOT IN ('downloaded', 'unresolved')"
         ).fetchall()
     finally:
@@ -1318,6 +1353,11 @@ def poll_once():
                 new_status = None
             if new_status and new_status != r["status"]:
                 status_updates.append((new_status, r["id"]))
+                if new_status == "downloaded":
+                    try:
+                        send_completion_email(r["requester"], r["title"], r["author"], r["book_type"])
+                    except Exception as e:
+                        logger.warning(f"completion email failed for {r['title']!r}: {e}")
 
         # 2. real download progress from qbit/sab - only worth checking once
         # something's actually been sent to a downloader (wanted or snatched)
