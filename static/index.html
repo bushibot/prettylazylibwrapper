@@ -38,19 +38,19 @@
   nav { display: flex; gap: 4px; }
   nav button {
     background: none; border: none; color: var(--text-dim); font-size: 0.95rem;
-    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    padding: 8px 14px; border-radius: 0; cursor: pointer;
   }
   nav button.active { background: var(--bg-card); color: var(--text); }
   .spacer { flex: 1; }
   select, input[type=text] {
     background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
-    padding: 9px 12px; border-radius: 8px; font-size: 0.9rem;
+    padding: 9px 12px; border-radius: 0; font-size: 0.9rem;
   }
   select:focus, input:focus { outline: 1px solid var(--accent); }
   main { max-width: 1400px; margin: 0 auto; padding: 20px; }
   .search-row { display: flex; gap: 10px; margin-bottom: 22px; flex-wrap: wrap; }
   .search-row input[type=text] { flex: 1; min-width: 220px; font-size: 1rem; padding: 12px 16px; }
-  .type-toggle { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .type-toggle { display: flex; border: 1px solid var(--border); border-radius: 0; overflow: hidden; }
   .type-toggle button {
     background: var(--bg-card); border: none; color: var(--text-dim); padding: 0 18px;
     cursor: pointer; font-size: 0.9rem;
@@ -74,7 +74,7 @@
     .grid { grid-template-columns: repeat(6, 1fr); }
   }
   .card {
-    background: var(--bg-card); border-radius: 10px; overflow: hidden;
+    background: var(--bg-card); border-radius: 0; overflow: hidden;
     border: 1px solid var(--border); transition: transform .12s, background .12s;
     display: flex; flex-direction: column;
   }
@@ -87,7 +87,7 @@
   }
   .badge {
     position: absolute; top: 8px; right: 8px; font-size: 0.68rem; font-weight: 600;
-    padding: 3px 8px; border-radius: 20px; color: white; text-transform: uppercase; letter-spacing: 0.03em;
+    padding: 3px 8px; border-radius: 0; color: white; text-transform: uppercase; letter-spacing: 0.03em;
   }
   .badge.have { background: var(--green); }
   .badge.submitted { background: var(--text-dim); }
@@ -101,7 +101,7 @@
   .card-author { font-size: 0.78rem; color: var(--text-dim); }
   .card-date { font-size: 0.72rem; color: var(--text-dim); margin-top: auto; padding-top: 6px; }
   .req-btn {
-    margin-top: 8px; width: 100%; padding: 8px; border-radius: 6px; border: none;
+    margin-top: 8px; width: 100%; padding: 8px; border-radius: 0; border: none;
     background: var(--accent); color: white; font-size: 0.8rem; font-weight: 600; cursor: pointer;
   }
   .req-btn:hover { filter: brightness(1.1); }
@@ -119,14 +119,14 @@
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
   th { color: var(--text-dim); font-weight: 600; text-transform: uppercase; font-size: 0.72rem; letter-spacing: 0.05em; }
-  td.status-cell span { padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 600; color: white; text-transform: capitalize; }
-  .thumb-cell img { width: 36px; height: 54px; object-fit: cover; border-radius: 3px; vertical-align: middle; }
+  td.status-cell span { padding: 3px 10px; border-radius: 0; font-size: 0.72rem; font-weight: 600; color: white; text-transform: capitalize; }
+  .thumb-cell img { width: 36px; height: 54px; object-fit: cover; border-radius: 0; vertical-align: middle; }
   .progress-wrap { display: flex; align-items: center; gap: 8px; min-width: 140px; }
   .progress-track {
-    flex: 1; height: 8px; border-radius: 20px; background: var(--bg); border: 1px solid var(--border);
+    flex: 1; height: 8px; border-radius: 0; background: var(--bg); border: 1px solid var(--border);
     overflow: hidden;
   }
-  .progress-fill { height: 100%; border-radius: 20px; transition: width 0.4s ease; }
+  .progress-fill { height: 100%; border-radius: 0; transition: width 0.4s ease; }
   .progress-fill.downloading { background: var(--green); }
   .progress-fill.slow { background: var(--amber); }
   .progress-fill.stalled { background: #e8813f; }
@@ -141,10 +141,10 @@
   .health-dot.broken { background: var(--red); }
   .health-dot.sending { background: var(--accent); }
   .requester-pill {
-    display: inline-block; padding: 2px 9px; border-radius: 20px; font-size: 0.72rem;
+    display: inline-block; padding: 2px 9px; border-radius: 0; font-size: 0.72rem;
     background: var(--bg-card); border: 1px solid var(--border); color: var(--text-dim);
   }
-  .mini-toggle { display: flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .mini-toggle { display: flex; border: 1px solid var(--border); border-radius: 0; overflow: hidden; }
   .mini-toggle button {
     background: var(--bg-card); border: none; color: var(--text-dim); padding: 0 18px;
     cursor: pointer; font-size: 0.9rem;
@@ -153,17 +153,17 @@
   .follow-row {
     display: flex; align-items: center; justify-content: space-between;
     padding: 12px 14px; background: var(--bg-card); border: 1px solid var(--border);
-    border-radius: 8px; margin-bottom: 8px;
+    border-radius: 0; margin-bottom: 8px;
   }
   .follow-name { font-weight: 600; font-size: 0.92rem; }
   .follow-meta { color: var(--text-dim); font-size: 0.78rem; margin-top: 2px; }
   .follow-unfollow {
     background: none; border: 1px solid var(--border); color: var(--text-dim);
-    padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 0.8rem; white-space: nowrap;
+    padding: 7px 14px; border-radius: 0; cursor: pointer; font-size: 0.8rem; white-space: nowrap;
   }
   .follow-unfollow:hover { color: var(--red); border-color: var(--red); }
   .follow-link {
-    margin-top: 4px; width: 100%; padding: 6px; border-radius: 6px; border: 1px solid var(--border);
+    margin-top: 4px; width: 100%; padding: 6px; border-radius: 0; border: 1px solid var(--border);
     background: none; color: var(--text-dim); font-size: 0.72rem; cursor: pointer;
   }
   .follow-link:hover { color: var(--accent); border-color: var(--accent); }
@@ -173,19 +173,19 @@
     display: flex; align-items: center; justify-content: center; padding: 20px;
   }
   .modal {
-    background: var(--bg-card); border: 1px solid var(--border); border-radius: 14px;
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 0;
     padding: 24px; max-width: 380px; width: 100%;
   }
   .modal h3 { margin: 0 0 4px; font-size: 1.1rem; }
   .modal .modal-book { color: var(--text-dim); font-size: 0.85rem; margin-bottom: 18px; }
   .modal-users { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
   .modal-users button {
-    padding: 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+    padding: 12px; border-radius: 0; border: 1px solid var(--border); background: var(--bg);
     color: var(--text); font-size: 0.95rem; font-weight: 600; cursor: pointer;
   }
   .modal-users button:hover { background: var(--accent); border-color: var(--accent); }
   .modal-cancel {
-    width: 100%; padding: 10px; border-radius: 8px; border: none; background: none;
+    width: 100%; padding: 10px; border-radius: 0; border: none; background: none;
     color: var(--text-dim); font-size: 0.85rem; cursor: pointer;
   }
   .modal-cancel:hover { color: var(--text); }
@@ -202,13 +202,13 @@
   </nav>
   <div class="spacer"></div>
   <a href="/config" title="Settings"
-     style="color:var(--text-dim);font-size:0.9rem;text-decoration:none;padding:8px 10px;border-radius:8px"
+     style="color:var(--text-dim);font-size:0.9rem;text-decoration:none;padding:8px 10px;border-radius: 0"
      onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">&#9881;</a>
   <a href="https://book.walkerpad.com" target="_blank" rel="noopener"
-     style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius:8px;white-space:nowrap"
+     style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius: 0;white-space:nowrap"
      onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Open Audiobookshelf</a>
   <a href="https://apps.apple.com/us/app/audiobooth-audiobooks-player/id6753017503" target="_blank" rel="noopener"
-     style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius:8px;white-space:nowrap"
+     style="color:var(--text-dim);font-size:0.85rem;text-decoration:none;padding:8px 10px;border-radius: 0;white-space:nowrap"
      onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--text-dim)'">Get the App</a>
   <label style="color:var(--text-dim);font-size:0.8rem">Language:</label>
   <select id="lang-picker" title="Filter search results by language"></select>
