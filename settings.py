@@ -28,6 +28,7 @@ SETTING_FIELDS = [
     ("ABB_MIN_REQUEST_INTERVAL", "Minimum seconds between requests to AudioBookBay - a single LL search can trigger several (one per result, for detail pages), and a 15-min cron pass searches every wanted book, so bursts add up fast. Raise this if you keep getting rate-limited/blocked.", False, "3"),
     ("WATCHLIST_CHECK_INTERVAL_HOURS", "How often the author/series watch-list re-checks Audible for new releases", False, "24"),
     ("WATCHLIST_MAX_NEW_PER_ITEM", "Safety cap: max new audiobooks auto-requested per followed author/series in a single check pass. Prevents a newly-followed author (or a big backlog) from flooding the download queue in one go - see lazylibrarian-duplicate-books-20260822.md for why this matters.", False, "5"),
+    ("WATCHLIST_REQUEST_INTERVAL_SECONDS", "Minimum seconds between individual auto-requests within a single watch-list check - each request triggers a real indexer search downstream, so this paces a prolific author's whole batch instead of firing it as one instantaneous burst.", False, "5"),
     ("SMTP_HOST", "SMTP server for request-completion emails, e.g. smtp.gmail.com", False, ""),
     ("SMTP_PORT", "SMTP port (587 for STARTTLS, standard for Gmail and most providers)", False, "587"),
     ("SMTP_USER", "SMTP username / from-address", False, ""),

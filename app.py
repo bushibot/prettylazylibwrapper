@@ -917,7 +917,7 @@ def follow_author(body: FollowIn):
         conn.close()
     # immediate feedback rather than waiting up to WATCHLIST_CHECK_INTERVAL_HOURS -
     # mirrors LL's own behavior of scanning an author's catalog right when added
-    threading.Thread(target=_watchlist_check_author, args=(name, body.requester), daemon=True).start()
+    threading.Thread(target=_watchlist_follow_check_author, args=(name, body.requester), daemon=True).start()
     return dict(row)
 
 
@@ -949,7 +949,7 @@ def follow_series(body: FollowIn):
         row = conn.execute("SELECT * FROM followed_series WHERE series_name=?", (name,)).fetchone()
     finally:
         conn.close()
-    threading.Thread(target=_watchlist_check_series, args=(name, body.requester), daemon=True).start()
+    threading.Thread(target=_watchlist_follow_check_series, args=(name, body.requester), daemon=True).start()
     return dict(row)
 
 
@@ -972,6 +972,16 @@ def _existing_audiobook_source_ids():
         conn.close()
 
 
+# Only one watchlist pass (scheduled sweep, manual check-now, or an
+# on-follow immediate check) may actually submit requests at a time. Real
+# incident, not hypothetical: a manual check-now collided with
+# watchlist_loop()'s own first automatic pass (fires 5 min after boot),
+# and the two unsynchronized passes independently auto-requested the same
+# books twice each, doubling outbound load to Shelfarr/Prowlarr/indexers
+# for no benefit - caught live, mid-run, via duplicate titles in the log.
+_watchlist_lock = threading.Lock()
+
+
 def _watchlist_process_products(products, match_author, requester, existing_source_ids):
     """Diffs a batch of Audible products against what's already requested/
     owned and auto-requests anything genuinely new, capped per call by
@@ -980,6 +990,10 @@ def _watchlist_process_products(products, match_author, requester, existing_sour
         cap = int(cfg.WATCHLIST_MAX_NEW_PER_ITEM)
     except (TypeError, ValueError):
         cap = 5
+    try:
+        request_interval = float(cfg.WATCHLIST_REQUEST_INTERVAL_SECONDS)
+    except (TypeError, ValueError):
+        request_interval = 5
     requested = 0
     for p in products:
         if requested >= cap:
@@ -1018,6 +1032,13 @@ def _watchlist_process_products(products, match_author, requester, existing_sour
             existing_source_ids.add(asin)
             requested += 1
             logger.info(f"watchlist: auto-requested '{title}' by {author_name} (followed by {requester})")
+            # Each request fans out into a real indexer search downstream
+            # (Shelfarr's SearchJob -> Prowlarr -> AudioBookBay and every
+            # other configured indexer) - pace individual requests, not
+            # just the authors/series they came from, so a single prolific
+            # author's whole batch doesn't fire as one instantaneous burst.
+            if requested < cap:
+                time.sleep(request_interval)
         except Exception as e:
             logger.warning(f"watchlist auto-request failed for {title!r}: {e}")
     return requested
@@ -1049,32 +1070,50 @@ def _watchlist_check_series(series_name, requester, existing_source_ids=None):
     _watchlist_process_products(products, None, requester, existing_source_ids)
 
 
-def watchlist_check_once():
-    conn = get_local_db()
-    try:
-        authors = conn.execute("SELECT * FROM followed_authors").fetchall()
-        series = conn.execute("SELECT * FROM followed_series").fetchall()
-    finally:
-        conn.close()
-    if not authors and not series:
-        return
+def _watchlist_follow_check_author(author_name, requester):
+    """Thread target for the immediate on-follow check - waits its turn
+    behind any in-progress sweep instead of racing it."""
+    with _watchlist_lock:
+        _watchlist_check_author(author_name, requester)
 
-    existing_source_ids = _existing_audiobook_source_ids()
-    now = datetime.utcnow().isoformat()
-    conn = get_local_db()
+
+def _watchlist_follow_check_series(series_name, requester):
+    with _watchlist_lock:
+        _watchlist_check_series(series_name, requester)
+
+
+def watchlist_check_once():
+    if not _watchlist_lock.acquire(blocking=False):
+        logger.info("watchlist: a check is already in progress - skipping this pass rather than running two at once")
+        return
     try:
-        for a in authors:
-            _watchlist_check_author(a["author_name"], a["followed_by"], existing_source_ids)
-            conn.execute("UPDATE followed_authors SET last_checked_at=? WHERE id=?", (now, a["id"]))
-            conn.commit()
-            time.sleep(2)  # gentle pacing against Audible, mirrors ABB_MIN_REQUEST_INTERVAL's intent
-        for s in series:
-            _watchlist_check_series(s["series_name"], s["followed_by"], existing_source_ids)
-            conn.execute("UPDATE followed_series SET last_checked_at=? WHERE id=?", (now, s["id"]))
-            conn.commit()
-            time.sleep(2)
+        conn = get_local_db()
+        try:
+            authors = conn.execute("SELECT * FROM followed_authors").fetchall()
+            series = conn.execute("SELECT * FROM followed_series").fetchall()
+        finally:
+            conn.close()
+        if not authors and not series:
+            return
+
+        existing_source_ids = _existing_audiobook_source_ids()
+        now = datetime.utcnow().isoformat()
+        conn = get_local_db()
+        try:
+            for a in authors:
+                _watchlist_check_author(a["author_name"], a["followed_by"], existing_source_ids)
+                conn.execute("UPDATE followed_authors SET last_checked_at=? WHERE id=?", (now, a["id"]))
+                conn.commit()
+                time.sleep(2)  # gentle pacing against Audible itself, separate from the per-request pacing above
+            for s in series:
+                _watchlist_check_series(s["series_name"], s["followed_by"], existing_source_ids)
+                conn.execute("UPDATE followed_series SET last_checked_at=? WHERE id=?", (now, s["id"]))
+                conn.commit()
+                time.sleep(2)
+        finally:
+            conn.close()
     finally:
-        conn.close()
+        _watchlist_lock.release()
 
 
 def watchlist_loop():
@@ -1094,7 +1133,8 @@ def watchlist_loop():
 @app.post("/api/follows/check-now")
 def watchlist_check_now():
     """Manual trigger, mainly for verifying the watch-list actually works
-    without waiting up to WATCHLIST_CHECK_INTERVAL_HOURS."""
+    without waiting up to WATCHLIST_CHECK_INTERVAL_HOURS. No-ops harmlessly
+    (via the lock in watchlist_check_once) if a pass is already running."""
     t = threading.Thread(target=watchlist_check_once, daemon=True)
     t.start()
     return {"ok": True, "note": "check running in the background - refresh Requests shortly"}
