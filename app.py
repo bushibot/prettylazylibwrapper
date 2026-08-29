@@ -1000,6 +1000,14 @@ def _watchlist_process_products(products, match_author, requester, existing_sour
         cover = images.get("500") or images.get("1000") or images.get("300")
         pub = p.get("publication_datetime", "") or ""
         release_date = pub.split("T")[0] if pub else "0000"
+        # Hold preorders until their release window - a Shelfarr/LL request
+        # for something not out yet just retries uselessly against
+        # indexers for months. Self-holding by construction: this item
+        # isn't added to existing_source_ids, so Audible's own catalog
+        # naturally re-surfaces it on every future check pass until the
+        # date actually passes, with no extra state to track.
+        if release_date != "0000" and release_date > datetime.utcnow().strftime("%Y-%m-%d"):
+            continue
         try:
             create_request(RequestIn(
                 requester=requester, book_type="audiobook", source_id=asin,
