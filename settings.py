@@ -29,6 +29,7 @@ SETTING_FIELDS = [
     ("WATCHLIST_CHECK_INTERVAL_HOURS", "How often the author/series watch-list re-checks Audible for new releases", False, "24"),
     ("WATCHLIST_MAX_NEW_PER_ITEM", "Safety cap: max new audiobooks auto-requested per followed author/series in a single check pass. Prevents a newly-followed author (or a big backlog) from flooding the download queue in one go - see lazylibrarian-duplicate-books-20260822.md for why this matters.", False, "5"),
     ("WATCHLIST_REQUEST_INTERVAL_SECONDS", "Minimum seconds between individual auto-requests within a single watch-list check - each request triggers a real indexer search downstream, so this paces a prolific author's whole batch instead of firing it as one instantaneous burst.", False, "5"),
+    ("STALE_REQUEST_EXPIRE_DAYS", "Days a request can sit at 'wanted' with no source ever found before it's auto-marked expired and stops being polled/retried (0 disables)", False, "30"),
     ("SMTP_HOST", "SMTP server for request-completion emails, e.g. smtp.gmail.com", False, ""),
     ("SMTP_PORT", "SMTP port (587 for STARTTLS, standard for Gmail and most providers)", False, "587"),
     ("SMTP_USER", "SMTP username / from-address", False, ""),

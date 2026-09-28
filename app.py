@@ -54,7 +54,7 @@ def init_local_db():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            requester TEXT NOT NULL,
+            requested_for TEXT NOT NULL,  -- who the book is for: a household member, or "Everyone"
             book_type TEXT NOT NULL,
             source_id TEXT NOT NULL,      -- audible ASIN (audiobook) or goodreads bookid (ebook)
             ll_bookid TEXT,               -- resolved LazyLibrarian/GoodReads bookid once known
@@ -63,24 +63,33 @@ def init_local_db():
             author TEXT NOT NULL,
             cover_url TEXT,
             release_date TEXT,
-            status TEXT DEFAULT 'submitted',   -- submitted, unresolved, wanted, snatched, downloaded
+            status TEXT DEFAULT 'submitted',   -- submitted, unresolved, wanted, snatched, downloaded, expired
             created_at TEXT,
             updated_at TEXT,
             progress_pct REAL DEFAULT 0,
             download_health TEXT DEFAULT 'sending',  -- sending, downloading, slow, stalled, broken, done
             health_checked_at TEXT,
             backend TEXT,                 -- which backend (lazylibrarian/shelfarr) created this row
+            requested_by TEXT,            -- who actually asked: a per-browser identity, or "Watchlist: <name>"
             UNIQUE(source_id, book_type)
         )
     """)
     # in case of upgrading an existing db that predates these columns
     cols = {r["name"] for r in conn.execute("PRAGMA table_info(requests)")}
-    for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL"), ("backend", "NULL")]:
+    if "requester" in cols and "requested_for" not in cols:
+        conn.execute("ALTER TABLE requests RENAME COLUMN requester TO requested_for")
+        cols.discard("requester")
+        cols.add("requested_for")
+    for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL"), ("backend", "NULL"), ("requested_by", "NULL")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT DEFAULT {default}")
     # rows created before the backend column existed all came from LL - the
     # only backend that existed at the time - so that's the correct backfill
     conn.execute("UPDATE requests SET backend='lazylibrarian' WHERE backend IS NULL")
+    # rows created before by/for were split: the person who clicked was the
+    # only identity recorded, and it doubled as both - correct backfill is to
+    # copy it forward rather than leave requested_by blank
+    conn.execute("UPDATE requests SET requested_by = requested_for WHERE requested_by IS NULL")
 
     # Author/series watch-list - replaces LL's AUTHORUPDATE/SERIESUPDATE/
     # SEARCHALLBOOKS monitoring, backend-agnostic (goes through
@@ -501,7 +510,8 @@ def cover_proxy(u: str):
 # ---------- schema ----------
 
 class RequestIn(BaseModel):
-    requester: str
+    requested_for: str  # who the book is for: a household member, or "Everyone"
+    requested_by: str   # who actually asked: a per-browser identity, or "Watchlist: <name>"
     book_type: str  # 'ebook' or 'audiobook'
     source_id: str
     authorid: Optional[str] = None
@@ -800,8 +810,10 @@ def audiobook_bestsellers():
 
 @app.post("/api/request")
 def create_request(req: RequestIn):
-    if req.requester not in get_users() and req.requester != EVERYONE_TAG:
-        raise HTTPException(400, "Unknown requester")
+    if req.requested_for not in get_users() and req.requested_for != EVERYONE_TAG:
+        raise HTTPException(400, "Unknown requested_for")
+    if not req.requested_by.strip():
+        raise HTTPException(400, "requested_by is required")
     if req.book_type not in ("ebook", "audiobook"):
         raise HTTPException(400, "book_type must be ebook or audiobook")
 
@@ -840,11 +852,11 @@ def create_request(req: RequestIn):
     conn = get_local_db()
     try:
         conn.execute("""
-            INSERT INTO requests (requester, book_type, source_id, ll_bookid, authorid, title, author, cover_url, release_date, status, created_at, updated_at, backend)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO requests (requested_for, requested_by, book_type, source_id, ll_bookid, authorid, title, author, cover_url, release_date, status, created_at, updated_at, backend)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id, book_type) DO UPDATE SET
-                requester=excluded.requester, updated_at=excluded.updated_at, backend=excluded.backend
-        """, (req.requester, req.book_type, req.source_id, result.backend_ref, req.authorid, req.title, req.author,
+                requested_for=excluded.requested_for, requested_by=excluded.requested_by, updated_at=excluded.updated_at, backend=excluded.backend
+        """, (req.requested_for, req.requested_by, req.book_type, req.source_id, result.backend_ref, req.authorid, req.title, req.author,
               req.cover, req.release_date, result.status, now, now, active_backend.name))
         conn.commit()
     finally:
@@ -853,22 +865,30 @@ def create_request(req: RequestIn):
 
 
 @app.get("/api/my-requests")
-def my_requests(requester: str):
+def my_requests(requested_for: str, include_expired: bool = False):
     conn = get_local_db()
     try:
-        rows = conn.execute(
-            "SELECT * FROM requests WHERE requester=? ORDER BY created_at DESC", (requester,)
-        ).fetchall()
+        if include_expired:
+            rows = conn.execute(
+                "SELECT * FROM requests WHERE requested_for=? ORDER BY created_at DESC", (requested_for,)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM requests WHERE requested_for=? AND status != 'expired' ORDER BY created_at DESC", (requested_for,)
+            ).fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
 
 
 @app.get("/api/all-requests")
-def all_requests():
+def all_requests(include_expired: bool = False):
     conn = get_local_db()
     try:
-        rows = conn.execute("SELECT * FROM requests ORDER BY created_at DESC").fetchall()
+        if include_expired:
+            rows = conn.execute("SELECT * FROM requests ORDER BY created_at DESC").fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM requests WHERE status != 'expired' ORDER BY created_at DESC").fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
@@ -982,10 +1002,12 @@ def _existing_audiobook_source_ids():
 _watchlist_lock = threading.Lock()
 
 
-def _watchlist_process_products(products, match_author, requester, existing_source_ids):
+def _watchlist_process_products(products, match_author, requester, existing_source_ids, follow_name):
     """Diffs a batch of Audible products against what's already requested/
     owned and auto-requests anything genuinely new, capped per call by
-    WATCHLIST_MAX_NEW_PER_ITEM. Returns how many were actually requested."""
+    WATCHLIST_MAX_NEW_PER_ITEM. Returns how many were actually requested.
+    follow_name is the followed author or series name, recorded as
+    requested_by so these are distinguishable from a real household click."""
     try:
         cap = int(cfg.WATCHLIST_MAX_NEW_PER_ITEM)
     except (TypeError, ValueError):
@@ -1026,7 +1048,8 @@ def _watchlist_process_products(products, match_author, requester, existing_sour
             continue
         try:
             create_request(RequestIn(
-                requester=requester, book_type="audiobook", source_id=asin,
+                requested_for=requester, requested_by=f"Watchlist: {follow_name}",
+                book_type="audiobook", source_id=asin,
                 title=title, author=author_name, cover=cover, release_date=release_date,
             ))
             existing_source_ids.add(asin)
@@ -1052,7 +1075,7 @@ def _watchlist_check_author(author_name, requester, existing_source_ids=None):
     except Exception as e:
         logger.warning(f"watchlist check failed for author {author_name!r}: {e}")
         return
-    _watchlist_process_products(products, author_name, requester, existing_source_ids)
+    _watchlist_process_products(products, author_name, requester, existing_source_ids, follow_name=author_name)
 
 
 def _watchlist_check_series(series_name, requester, existing_source_ids=None):
@@ -1067,7 +1090,7 @@ def _watchlist_check_series(series_name, requester, existing_source_ids=None):
     except Exception as e:
         logger.warning(f"watchlist check failed for series {series_name!r}: {e}")
         return
-    _watchlist_process_products(products, None, requester, existing_source_ids)
+    _watchlist_process_products(products, None, requester, existing_source_ids, follow_name=series_name)
 
 
 def _watchlist_follow_check_author(author_name, requester):
@@ -1303,13 +1326,13 @@ def status_poll_loop():
         time.sleep(90)  # sync/maindata is a cheap delta fetch, so this can run closer to real-time
 
 
-def send_completion_email(requester, title, author, book_type):
+def send_completion_email(requested_for, title, author, book_type):
     """Best-effort - a household member only gets emailed if they're listed
     in USER_EMAILS. Requests made as 'Everyone' are skipped: per-requester
     notification has no single target for a shared request."""
-    if requester == EVERYONE_TAG:
+    if requested_for == EVERYONE_TAG:
         return
-    to_addr = get_user_emails().get(requester)
+    to_addr = get_user_emails().get(requested_for)
     if not to_addr:
         return
     host, user, password = cfg.SMTP_HOST, cfg.SMTP_USER, cfg.SMTP_PASS
@@ -1333,20 +1356,30 @@ def send_completion_email(requester, title, author, book_type):
         server.starttls()
         server.login(user, password)
         server.send_message(msg)
-    logger.info(f"completion email sent to {requester} <{to_addr}> for {title!r}")
+    logger.info(f"completion email sent to {requested_for} <{to_addr}> for {title!r}")
 
 
 def poll_once():
     conn_local = get_local_db()
     try:
         rows = conn_local.execute(
-            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend, requester FROM requests "
-            "WHERE status NOT IN ('downloaded', 'unresolved')"
+            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend, requested_for, created_at FROM requests "
+            "WHERE status NOT IN ('downloaded', 'unresolved', 'expired')"
         ).fetchall()
     finally:
         conn_local.close()
     if not rows:
         return
+
+    # A request that's been sitting at 'wanted' with no source ever found
+    # for STALE_REQUEST_EXPIRE_DAYS+ just retries forever otherwise - this
+    # is what actually swamped the requests list (2,679 of 2,691 rows stuck
+    # this way after a 97-author watchlist backfill). 0 disables.
+    try:
+        expire_days = float(cfg.STALE_REQUEST_EXPIRE_DAYS)
+    except (TypeError, ValueError):
+        expire_days = 30
+    expire_cutoff = (datetime.utcnow() - timedelta(days=expire_days)) if expire_days > 0 else None
 
     # Requests are polled against whichever backend actually created them
     # (requests.backend), not whichever backend is live right now - a row
@@ -1383,6 +1416,8 @@ def poll_once():
         qbit_torrents, sab_queue, sab_history = {}, [], []
 
     for r in rows:
+        final_status = r["status"]
+
         # 1. status against the backend's own catalog (Wanted/Snatched/Downloaded)
         if r["ll_bookid"]:
             row_backend = backends_by_name[r["backend"] or "lazylibrarian"]
@@ -1393,15 +1428,27 @@ def poll_once():
                 new_status = None
             if new_status and new_status != r["status"]:
                 status_updates.append((new_status, r["id"]))
+                final_status = new_status
                 if new_status == "downloaded":
                     try:
-                        send_completion_email(r["requester"], r["title"], r["author"], r["book_type"])
+                        send_completion_email(r["requested_for"], r["title"], r["author"], r["book_type"])
                     except Exception as e:
                         logger.warning(f"completion email failed for {r['title']!r}: {e}")
 
+        # 1b. auto-expire anything still 'wanted' after STALE_REQUEST_EXPIRE_DAYS
+        # with no source ever found - stops it being retried/displayed forever
+        if final_status == "wanted" and expire_cutoff and r["created_at"]:
+            try:
+                created_dt = datetime.strptime(r["created_at"][:19], "%Y-%m-%dT%H:%M:%S")
+            except ValueError:
+                created_dt = None
+            if created_dt and created_dt < expire_cutoff:
+                status_updates.append(("expired", r["id"]))
+                final_status = "expired"
+
         # 2. real download progress from qbit/sab - only worth checking once
         # something's actually been sent to a downloader (wanted or snatched)
-        if r["status"] in ("wanted", "snatched"):
+        if final_status in ("wanted", "snatched"):
             try:
                 health = match_download_health(r["title"], r["author"], r["book_type"], qbit_torrents, sab_queue, sab_history)
             except Exception as e:

@@ -96,6 +96,7 @@
   .badge.snatched { background: var(--purple); }
   .badge.downloaded { background: var(--green); }
   .badge.preorder { background: var(--purple); }
+  .badge.expired { background: var(--text-dim); }
   .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
   .card-title { font-size: 0.85rem; font-weight: 600; line-height: 1.25; }
   .card-author { font-size: 0.78rem; color: var(--text-dim); }
@@ -214,6 +215,8 @@
   <select id="lang-picker" title="Filter search results by language"></select>
   <label style="color:var(--text-dim);font-size:0.8rem">Select Reader:</label>
   <select id="user-picker"></select>
+  <label style="color:var(--text-dim);font-size:0.8rem" title="Remembered on this browser - who actually clicked 'Request', for telling a real ask apart from a Watchlist auto-request">You are:</label>
+  <select id="identity-picker"></select>
 </header>
 
 <div id="source-banner" style="display:none;background:rgba(210,153,34,0.12);border-bottom:1px solid var(--amber);color:var(--amber);padding:10px 20px;font-size:0.85rem;text-align:center"></div>
@@ -259,6 +262,9 @@
   </div>
 
   <div id="view-mine" style="display:none">
+    <label style="color:var(--text-dim);font-size:0.85rem;display:inline-flex;align-items:center;gap:6px;margin-bottom:10px">
+      <input type="checkbox" id="show-expired-toggle"> Show expired (no source ever found)
+    </label>
     <div id="mine-table"></div>
   </div>
 
@@ -286,6 +292,24 @@ let allUsers = [];
 let searchTimer = null;
 let pendingRequestItem = null;
 
+const IDENTITY_KEY = "plw_identity";
+
+function getIdentity() {
+  try {
+    return localStorage.getItem(IDENTITY_KEY) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function setIdentity(name) {
+  try {
+    localStorage.setItem(IDENTITY_KEY, name);
+  } catch (e) {
+    // private window / blocked storage - identity just won't persist this session
+  }
+}
+
 async function loadUsers() {
   allUsers = await fetch(API + "/api/users").then(r => r.json());
   const sel = document.getElementById("user-picker");
@@ -298,6 +322,16 @@ async function loadUsers() {
     viewFilter = sel.value;
     if (document.getElementById("view-mine").style.display !== "none") loadMine();
   });
+
+  // Separate from the picker above on purpose: this one *is* remembered per
+  // browser (a deliberate tradeoff on a shared device - see the answered
+  // question this shipped with) so a manual request can record who actually
+  // clicked, distinct from who it's for.
+  const idSel = document.getElementById("identity-picker");
+  idSel.innerHTML = `<option value="">Select...</option>` + allUsers.map(u => `<option value="${u}">${u}</option>`).join("");
+  const saved = getIdentity();
+  if (saved && allUsers.includes(saved)) idSel.value = saved;
+  idSel.addEventListener("change", () => setIdentity(idSel.value));
 }
 
 function statusLabel(s) {
@@ -511,7 +545,11 @@ async function submitRequest(requester) {
   }
 
   const body = {
-    requester,
+    requested_for: requester,
+    // falls back to the "for" pick itself if nobody's set an identity yet,
+    // rather than blocking the request on a household member forgetting to
+    // set "You are" first
+    requested_by: getIdentity() || requester,
     book_type: currentType,
     source_id: item.source_id,
     authorid: item.authorid,
@@ -529,7 +567,7 @@ async function submitRequest(requester) {
     if (!r.ok) throw new Error(await r.text());
     const result = await r.json();
     if (!result.resolved) {
-      alert(`Requested for ${requester}, but LazyLibrarian couldn't find a matching catalog entry for "${item.title}" yet - it's saved and flagged, but won't auto-download until that's sorted out.`);
+      alert(`Requested for ${requester}, but the active backend couldn't find a matching catalog entry for "${item.title}" yet - it's saved and flagged, but won't auto-download until that's sorted out.`);
     }
     // the card could be in the search results or the New Releases grid (or
     // both, briefly) - refresh whichever are actually visible so the button
@@ -587,18 +625,19 @@ function renderProgress(r) {
 async function loadMine() {
   const el = document.getElementById("mine-table");
   el.innerHTML = `<div class="loading">Loading...</div>`;
+  const includeExpired = document.getElementById("show-expired-toggle").checked;
   const url = viewFilter === "All"
-    ? `${API}/api/all-requests`
-    : `${API}/api/my-requests?requester=${encodeURIComponent(viewFilter)}`;
+    ? `${API}/api/all-requests?include_expired=${includeExpired ? "1" : "0"}`
+    : `${API}/api/my-requests?requested_for=${encodeURIComponent(viewFilter)}&include_expired=${includeExpired ? "1" : "0"}`;
   const rows = await fetch(url).then(r => r.json());
   if (!rows.length) {
     el.innerHTML = `<div class="empty">${viewFilter === "All" ? "No requests yet." : viewFilter + " hasn't requested anything yet."}</div>`;
     return;
   }
-  const showRequester = viewFilter === "All";
+  const showRequestedFor = viewFilter === "All";
   el.innerHTML = `
     <table>
-      <thead><tr><th></th><th>Title</th><th>Author</th><th>Type</th>${showRequester ? "<th>Requested by</th>" : ""}<th>Requested</th><th>Status</th><th>Progress</th></tr></thead>
+      <thead><tr><th></th><th>Title</th><th>Author</th><th>Type</th>${showRequestedFor ? "<th>Requested for</th>" : ""}<th>Requested by</th><th>Requested</th><th>Status</th><th>Progress</th></tr></thead>
       <tbody>
         ${rows.map(r => `
           <tr>
@@ -606,7 +645,8 @@ async function loadMine() {
             <td>${r.title}</td>
             <td>${r.author}</td>
             <td>${r.book_type === "audiobook" ? "Audiobook" : "eBook"}</td>
-            ${showRequester ? `<td><span class="requester-pill">${r.requester}</span></td>` : ""}
+            ${showRequestedFor ? `<td><span class="requester-pill">${r.requested_for}</span></td>` : ""}
+            <td><span class="requester-pill">${r.requested_by || ""}</span></td>
             <td>${new Date(r.created_at).toLocaleDateString()}</td>
             <td class="status-cell"><span class="badge ${r.status}">${statusLabel(r.status)}</span></td>
             <td>${renderProgress(r)}</td>
@@ -647,6 +687,7 @@ document.getElementById("nav-mine").addEventListener("click", () => {
   loadMine();
   mineRefreshTimer = setInterval(loadMine, 30000);  // matches backend poll cadence closely enough to feel live
 });
+document.getElementById("show-expired-toggle").addEventListener("change", loadMine);
 document.getElementById("nav-follows").addEventListener("click", () => {
   showView("follows");
   loadFollows();
