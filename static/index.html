@@ -78,6 +78,7 @@
     border: 1px solid var(--border); transition: transform .12s, background .12s;
     display: flex; flex-direction: column;
   }
+  .card.dormant .cover-wrap img, .card.dormant .card-title, .card.dormant .card-author { opacity: 0.55; }
   .card:hover { background: var(--bg-card-hover); transform: translateY(-2px); }
   .cover-wrap { position: relative; aspect-ratio: 2/3; background: #0d0f14; }
   .cover-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -96,7 +97,8 @@
   .badge.snatched { background: var(--purple); }
   .badge.downloaded { background: var(--green); }
   .badge.preorder { background: var(--purple); }
-  .badge.expired { background: var(--text-dim); }
+  .badge.expired, .badge.dormant { background: var(--text-dim); }
+  .badge.cancelled { background: var(--red); }
   .card-body { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 4px; flex: 1; }
   .card-title { font-size: 0.85rem; font-weight: 600; line-height: 1.25; }
   .card-author { font-size: 0.78rem; color: var(--text-dim); }
@@ -263,7 +265,7 @@
 
   <div id="view-mine" style="display:none">
     <label style="color:var(--text-dim);font-size:0.85rem;display:inline-flex;align-items:center;gap:6px;margin-bottom:10px">
-      <input type="checkbox" id="show-expired-toggle"> Show expired (no source ever found)
+      <input type="checkbox" id="show-expired-toggle"> Show dormant (no source found yet - re-checked monthly)
     </label>
     <div id="mine-table"></div>
   </div>
@@ -334,8 +336,12 @@ async function loadUsers() {
   idSel.addEventListener("change", () => setIdentity(idSel.value));
 }
 
+const REREQUESTABLE = ["expired", "dormant", "cancelled"];
+
 function statusLabel(s) {
   if (!s) return "";
+  if (s === "dormant" || s === "expired") return "Checking monthly";
+  if (s === "cancelled") return "Cancelled";
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
@@ -359,10 +365,10 @@ function renderCard(item) {
   let btn;
   if (item.already_have) {
     btn = `<button class="req-btn" disabled>Already Have</button>`;
-  } else if (item.request_status) {
+  } else if (item.request_status && !REREQUESTABLE.includes(item.request_status)) {
     btn = `<button class="req-btn" disabled>${statusLabel(item.request_status)}</button>`;
   } else {
-    btn = `<button class="req-btn" onclick='openRequestModal(${JSON.stringify(item).replace(/'/g, "&apos;")})'>Request</button>`;
+    btn = `<button class="req-btn" onclick='openRequestModal(${JSON.stringify(item).replace(/'/g, "&apos;")})'>${({dormant: "Check availability", expired: "Check availability", cancelled: "Request again"})[item.request_status] || "Request"}</button>`;
   }
 
   // The watch-list is audiobook-only (Audible-backed, same as this app's
@@ -372,7 +378,7 @@ function renderCard(item) {
     : "";
 
   return `
-    <div class="card" data-source-id="${item.source_id}">
+    <div class="card${REREQUESTABLE.includes(item.request_status) ? " dormant" : ""}" data-source-id="${item.source_id}">
       <div class="cover-wrap">${coverImg(item.cover, item.title)}${badge}</div>
       <div class="card-body">
         <div class="card-title">${item.title}${item.subtitle ? `<div style="font-weight:400;color:var(--text-dim);font-size:0.75rem;margin-top:2px">${item.subtitle}</div>` : ""}</div>

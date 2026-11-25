@@ -570,9 +570,14 @@ class ShelfarrBackend(Backend):
         clock: a retry bumps it, so a given request can't get retried more
         than once per window even across many poll cycles."""
         cutoff = datetime.utcnow() - timedelta(hours=self.STALE_RETRY_HOURS)
+        today = datetime.utcnow().strftime("%Y-%m-%d")
         for row in pending_rows:
             backend_ref = row["ll_bookid"]
             if not backend_ref:
+                continue
+            # Not released yet: there's nothing to find, so re-searching
+            # every 6h just burns indexer goodwill (AudioBookBay especially).
+            if row["release_date"] and row["release_date"][:10] > today:
                 continue
             try:
                 data = self._api("GET", f"requests/{backend_ref}")

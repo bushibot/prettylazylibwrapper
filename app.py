@@ -63,7 +63,7 @@ def init_local_db():
             author TEXT NOT NULL,
             cover_url TEXT,
             release_date TEXT,
-            status TEXT DEFAULT 'submitted',   -- submitted, unresolved, wanted, snatched, downloaded, expired
+            status TEXT DEFAULT 'submitted',   -- submitted, unresolved, wanted, snatched, downloaded, dormant, cancelled
             created_at TEXT,
             updated_at TEXT,
             progress_pct REAL DEFAULT 0,
@@ -81,12 +81,17 @@ def init_local_db():
         cols.discard("requester")
         cols.add("requested_for")
     for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL"), ("backend", "NULL"), ("requested_by", "NULL"),
-                         ("wanted_since", "NULL"), ("revive_queued_at", "NULL"), ("revive_priority", "NULL")]:
+                         ("wanted_since", "NULL"), ("revive_queued_at", "NULL"), ("revive_priority", "NULL"),
+                         ("dormant_checked_at", "NULL"), ("audible_missing", "0")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT DEFAULT {default}")
     # rows created before the backend column existed all came from LL - the
     # only backend that existed at the time - so that's the correct backfill
     conn.execute("UPDATE requests SET backend='lazylibrarian' WHERE backend IS NULL")
+    # 'expired' was a dead end (nothing ever looked at it again). It's been
+    # replaced by 'dormant': still tracked, re-checked monthly - see
+    # dormant_trickle(). Any leftover expired rows become dormant.
+    conn.execute("UPDATE requests SET status='dormant' WHERE status='expired'")
     # rows created before by/for were split: the person who clicked was the
     # only identity recorded, and it doubled as both - correct backfill is to
     # copy it forward rather than leave requested_by blank
@@ -820,6 +825,32 @@ def create_request(req: RequestIn):
 
     now = datetime.utcnow().isoformat()
 
+    # A person (not the watchlist) asking again for something dormant or
+    # cancelled is the strongest "I really want this" signal there is: revive
+    # it immediately with a fresh search rather than filing a duplicate.
+    if not req.requested_by.startswith("Watchlist:"):
+        conn = get_local_db()
+        try:
+            existing = conn.execute(
+                "SELECT * FROM requests WHERE source_id=? AND book_type=? "
+                "AND status IN ('expired', 'dormant', 'cancelled') AND ll_bookid IS NOT NULL",
+                (req.source_id, req.book_type)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE requests SET status='wanted', wanted_since=?, dormant_checked_at=?, audible_missing=0, "
+                    "revive_queued_at=NULL, requested_for=?, requested_by=?, updated_at=?, download_health='sending' "
+                    "WHERE id=?", (now, now, req.requested_for, req.requested_by, now, existing["id"]))
+                conn.commit()
+        finally:
+            conn.close()
+        if existing:
+            logger.info(f"re-request: '{existing['title']}' {existing['status']} -> wanted by {req.requested_by}")
+            try:
+                get_backend_for_row(existing["backend"]).reset_wanted(existing["ll_bookid"], existing["book_type"])
+            except Exception as e:
+                logger.warning(f"re-request: backend reset failed for {existing['id']}: {e}")
+            return {"ok": True, "resolved": True}
+
     # Everything backend-specific - resolving a catalog id, adding the book,
     # marking it wanted (or holding a preorder), locking/dual-format
     # clearing where the backend needs that, triggering a search - happens
@@ -875,7 +906,7 @@ def my_requests(requested_for: str, include_expired: bool = False):
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM requests WHERE requested_for=? AND status != 'expired' ORDER BY created_at DESC", (requested_for,)
+                "SELECT * FROM requests WHERE requested_for=? AND status NOT IN ('expired', 'dormant', 'cancelled') ORDER BY created_at DESC", (requested_for,)
             ).fetchall()
     finally:
         conn.close()
@@ -889,7 +920,7 @@ def all_requests(include_expired: bool = False):
         if include_expired:
             rows = conn.execute("SELECT * FROM requests ORDER BY created_at DESC").fetchall()
         else:
-            rows = conn.execute("SELECT * FROM requests WHERE status != 'expired' ORDER BY created_at DESC").fetchall()
+            rows = conn.execute("SELECT * FROM requests WHERE status NOT IN ('expired', 'dormant', 'cancelled') ORDER BY created_at DESC").fetchall()
     finally:
         conn.close()
     return [dict(r) for r in rows]
@@ -1316,10 +1347,11 @@ def status_poll_loop():
     while True:
         try:
             poll_once()
-            try:
-                revive_trickle()
-            except Exception as e:
-                logger.warning(f"revive trickle failed: {e}")
+            for fn in (revive_trickle, dormant_trickle):
+                try:
+                    fn()
+                except Exception as e:
+                    logger.warning(f"{fn.__name__} failed: {e}")
         except Exception as e:
             logger.warning(f"status poll error: {e}")
         try:
@@ -1433,15 +1465,15 @@ def revive_trickle():
             return
         row = conn.execute(
             "SELECT id, ll_bookid, book_type, backend, title FROM requests "
-            "WHERE status='expired' AND revive_queued_at IS NOT NULL "
+            "WHERE status IN ('expired', 'dormant') AND revive_queued_at IS NOT NULL "
             "ORDER BY COALESCE(revive_priority, 0) DESC, created_at DESC LIMIT 1"
         ).fetchone()
         if not row:
             return
         now = now_dt.isoformat()
         conn.execute(
-            "UPDATE requests SET status='wanted', wanted_since=?, revive_queued_at=NULL, "
-            "updated_at=?, download_health='sending' WHERE id=?", (now, now, row["id"])
+            "UPDATE requests SET status='wanted', wanted_since=?, revive_queued_at=NULL, dormant_checked_at=?, "
+            "updated_at=?, download_health='sending' WHERE id=?", (now, now, now, row["id"])
         )
         conn.commit()
     finally:
@@ -1454,12 +1486,107 @@ def revive_trickle():
             logger.warning(f"revive: backend reset failed for {row['id']}: {e}")
 
 
+def _audible_product_state(asin):
+    """('exists', release_date) / ('missing', None) / (None, None) on error.
+
+    A real ASIN returns product attrs incl. release_date; a pulled or
+    never-real one comes back as a bare {"asin": ...} with no attrs (checked
+    live 2026-11-24 against a real and a bogus ASIN)."""
+    try:
+        r = requests.get(f"{AUDIBLE_API}/{asin}", params={"response_groups": "product_attrs"}, timeout=15)
+        if r.status_code == 404:
+            return "missing", None
+        r.raise_for_status()
+        p = r.json().get("product") or {}
+    except Exception as e:
+        logger.warning(f"dormant check: Audible lookup failed for {asin}: {e}")
+        return None, None
+    if p.get("release_date") or p.get("title"):
+        return "exists", p.get("release_date")
+    return "missing", None
+
+
+def dormant_trickle():
+    """Monthly re-check of dormant requests, one at a time, evenly spread.
+
+    Nothing is ever dropped just for being hard to find - a dormant request
+    gets one look per DORMANT_CHECK_DAYS:
+      - audiobook pulled from Audible (2 checks in a row) -> 'cancelled'
+      - not released yet (release date may have slipped) -> stay dormant
+      - otherwise -> back to 'wanted' with one fresh search; if that still
+        finds nothing within REVIVE_EXPIRE_DAYS it goes dormant again
+    Spacing = DORMANT_CHECK_DAYS spread over however many are dormant, capped
+    at DORMANT_MAX_PER_DAY, so the indexer load stays flat no matter how big
+    the dormant pile gets.
+    """
+    try:
+        days = float(cfg.DORMANT_CHECK_DAYS)
+        cap = float(cfg.DORMANT_MAX_PER_DAY)
+    except (TypeError, ValueError):
+        days, cap = 30, 100
+    if days <= 0 or cap <= 0:
+        return
+    now_dt = datetime.utcnow()
+    due_before = (now_dt - timedelta(days=days)).isoformat()
+    conn = get_local_db()
+    try:
+        n = conn.execute("SELECT COUNT(*) FROM requests WHERE status='dormant'").fetchone()[0]
+        if not n:
+            return
+        per_day = min(cap, max(1.0, n / days))
+        last = _parse_dt(conn.execute("SELECT MAX(dormant_checked_at) FROM requests WHERE status IN ('dormant','wanted','cancelled')").fetchone()[0])
+        if last and now_dt - last < timedelta(seconds=86400 / per_day):
+            return
+        row = conn.execute(
+            "SELECT * FROM requests WHERE status='dormant' "
+            "AND (dormant_checked_at IS NULL OR dormant_checked_at < ?) "
+            "ORDER BY dormant_checked_at IS NOT NULL, dormant_checked_at, "
+            "COALESCE(revive_priority, 0) DESC, created_at DESC LIMIT 1", (due_before,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return
+
+    now = now_dt.isoformat()
+    new_status, release_date, missing = "wanted", row["release_date"], 0
+    if row["book_type"] == "audiobook" and row["source_id"]:
+        state, rel = _audible_product_state(row["source_id"])
+        if state is None:
+            new_status = "dormant"   # lookup failed - try again next cycle, don't guess
+        elif state == "missing":
+            missing = int(row["audible_missing"] or 0) + 1
+            new_status = "cancelled" if missing >= 2 else "dormant"
+        else:
+            release_date = rel or release_date
+    rel_dt = _parse_dt(release_date)
+    if new_status == "wanted" and rel_dt and rel_dt > now_dt:
+        new_status = "dormant"       # not out yet - nothing to find
+
+    conn = get_local_db()
+    try:
+        conn.execute(
+            "UPDATE requests SET status=?, release_date=?, audible_missing=?, dormant_checked_at=?, "
+            "wanted_since=CASE WHEN ?='wanted' THEN ? ELSE wanted_since END, updated_at=? WHERE id=?",
+            (new_status, release_date, missing, now, new_status, now, now, row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"dormant check: '{row['title']}' (id {row['id']}) -> {new_status}"
+                + (f", release date now {release_date}" if release_date != row["release_date"] else ""))
+    if new_status == "wanted" and row["ll_bookid"]:
+        try:
+            get_backend_for_row(row["backend"]).reset_wanted(row["ll_bookid"], row["book_type"])
+        except Exception as e:
+            logger.warning(f"dormant check: backend reset failed for {row['id']}: {e}")
+
+
 def poll_once():
     conn_local = get_local_db()
     try:
         rows = conn_local.execute(
             "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend, requested_for, created_at, wanted_since FROM requests "
-            "WHERE status NOT IN ('downloaded', 'unresolved', 'expired')"
+            "WHERE status NOT IN ('downloaded', 'unresolved', 'expired', 'dormant', 'cancelled')"
         ).fetchall()
     finally:
         conn_local.close()
@@ -1530,12 +1657,13 @@ def poll_once():
                     except Exception as e:
                         logger.warning(f"completion email failed for {r['title']!r}: {e}")
 
-        # 1b. auto-expire anything still 'wanted' after STALE_REQUEST_EXPIRE_DAYS
-        # with no source ever found - stops it being retried/displayed forever
+        # 1b. anything still 'wanted' after STALE_REQUEST_EXPIRE_DAYS with no
+        # source found goes dormant: off the active search treadmill, but
+        # re-checked monthly by dormant_trickle() - never dropped for good
         if final_status == "wanted" and expire_cutoff and r["created_at"]:
             if _expiry_due(r, expire_days):
-                status_updates.append(("expired", r["id"]))
-                final_status = "expired"
+                status_updates.append(("dormant", r["id"]))
+                final_status = "dormant"
 
         # 2. real download progress from qbit/sab - only worth checking once
         # something's actually been sent to a downloader (wanted or snatched)
