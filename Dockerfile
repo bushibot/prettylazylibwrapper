@@ -9,6 +9,7 @@ COPY app.py .
 COPY abb_bridge.py .
 COPY settings.py .
 COPY backends.py .
+COPY revive_queue.py .
 COPY static ./static
 
 RUN mkdir -p /data

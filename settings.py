@@ -30,6 +30,8 @@ SETTING_FIELDS = [
     ("WATCHLIST_MAX_NEW_PER_ITEM", "Safety cap: max new audiobooks auto-requested per followed author/series in a single check pass. Prevents a newly-followed author (or a big backlog) from flooding the download queue in one go - see lazylibrarian-duplicate-books-20260822.md for why this matters.", False, "5"),
     ("WATCHLIST_REQUEST_INTERVAL_SECONDS", "Minimum seconds between individual auto-requests within a single watch-list check - each request triggers a real indexer search downstream, so this paces a prolific author's whole batch instead of firing it as one instantaneous burst.", False, "5"),
     ("STALE_REQUEST_EXPIRE_DAYS", "Days a request can sit at 'wanted' with no source ever found before it's auto-marked expired and stops being polled/retried (0 disables)", False, "30"),
+    ("REVIVE_PER_DAY", "Max expired requests moved back to 'wanted' per 24h, evenly spaced, from the revive queue (filled by revive_queue.py from a reviewed CSV). Each revival triggers a real indexer search, so keep this modest. 0 pauses reviving.", False, "50"),
+    ("REVIVE_EXPIRE_DAYS", "Days a revived request gets before it re-expires (it already had one full STALE_REQUEST_EXPIRE_DAYS window)", False, "7"),
     ("SMTP_HOST", "SMTP server for request-completion emails, e.g. smtp.gmail.com", False, ""),
     ("SMTP_PORT", "SMTP port (587 for STARTTLS, standard for Gmail and most providers)", False, "587"),
     ("SMTP_USER", "SMTP username / from-address", False, ""),

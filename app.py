@@ -80,7 +80,8 @@ def init_local_db():
         conn.execute("ALTER TABLE requests RENAME COLUMN requester TO requested_for")
         cols.discard("requester")
         cols.add("requested_for")
-    for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL"), ("backend", "NULL"), ("requested_by", "NULL")]:
+    for col, default in [("progress_pct", "0"), ("download_health", "'sending'"), ("health_checked_at", "NULL"), ("backend", "NULL"), ("requested_by", "NULL"),
+                         ("wanted_since", "NULL"), ("revive_queued_at", "NULL"), ("revive_priority", "NULL")]:
         if col not in cols:
             conn.execute(f"ALTER TABLE requests ADD COLUMN {col} TEXT DEFAULT {default}")
     # rows created before the backend column existed all came from LL - the
@@ -1315,6 +1316,10 @@ def status_poll_loop():
     while True:
         try:
             poll_once()
+            try:
+                revive_trickle()
+            except Exception as e:
+                logger.warning(f"revive trickle failed: {e}")
         except Exception as e:
             logger.warning(f"status poll error: {e}")
         try:
@@ -1359,11 +1364,101 @@ def send_completion_email(requested_for, title, author, book_type):
     logger.info(f"completion email sent to {requested_for} <{to_addr}> for {title!r}")
 
 
+def _parse_dt(v):
+    """Best-effort parse of the ISO-ish timestamps/dates stored in requests."""
+    if not v:
+        return None
+    for fmt, n in (("%Y-%m-%dT%H:%M:%S", 19), ("%Y-%m-%d %H:%M:%S", 19), ("%Y-%m-%d", 10)):
+        try:
+            return datetime.strptime(v[:n], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _expiry_due(r, expire_days):
+    """Whether a 'wanted' row has gone stale.
+
+    The clock starts at the LATEST of: when it was requested, when the book
+    is actually released, and when it was last revived. Measuring from
+    created_at alone (the original 2026-09-27 version) expired preorders
+    before they even came out - e.g. a book requested in August for a
+    November release was expired in September, and once expired nothing
+    polls it again, so it never picked up its real release.
+
+    A revived row gets the shorter REVIVE_EXPIRE_DAYS window: it already
+    had one full window and failed, so it gets one more short look rather
+    than another month of retries.
+    """
+    starts = [d for d in (_parse_dt(r["created_at"]), _parse_dt(r["release_date"]),
+                          _parse_dt(r["wanted_since"])) if d]
+    if not starts:
+        return False
+    window = expire_days
+    if r["wanted_since"]:
+        try:
+            window = float(cfg.REVIVE_EXPIRE_DAYS)
+        except (TypeError, ValueError):
+            window = 7
+    return max(starts) < datetime.utcnow() - timedelta(days=window)
+
+
+def revive_trickle():
+    """Move queued 'expired' rows back to 'wanted', one at a time, spaced out.
+
+    Reviving is deliberately throttled: every 'wanted' Shelfarr row gets a
+    fresh indexer search (and Shelfarr's poll_maintenance re-searches
+    not_found rows every few hours), so un-expiring thousands at once would
+    hammer every indexer - AudioBookBay especially. Rows are queued by
+    revive_queue.py (from a reviewed CSV) and released at most
+    REVIVE_PER_DAY per 24h, evenly spaced, highest revive_priority first,
+    then most recently requested first.
+    """
+    try:
+        per_day = float(cfg.REVIVE_PER_DAY)
+    except (TypeError, ValueError):
+        per_day = 50
+    if per_day <= 0:
+        return
+    spacing = timedelta(seconds=86400 / per_day)
+    now_dt = datetime.utcnow()
+    conn = get_local_db()
+    try:
+        last = conn.execute("SELECT MAX(wanted_since) FROM requests").fetchone()[0]
+        last_dt = _parse_dt(last)
+        if last_dt and now_dt - last_dt < spacing:
+            return
+        day_ago = (now_dt - timedelta(days=1)).isoformat()
+        if conn.execute("SELECT COUNT(*) FROM requests WHERE wanted_since > ?", (day_ago,)).fetchone()[0] >= per_day:
+            return
+        row = conn.execute(
+            "SELECT id, ll_bookid, book_type, backend, title FROM requests "
+            "WHERE status='expired' AND revive_queued_at IS NOT NULL "
+            "ORDER BY COALESCE(revive_priority, 0) DESC, created_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            return
+        now = now_dt.isoformat()
+        conn.execute(
+            "UPDATE requests SET status='wanted', wanted_since=?, revive_queued_at=NULL, "
+            "updated_at=?, download_health='sending' WHERE id=?", (now, now, row["id"])
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"revive: '{row['title']}' (id {row['id']}) expired -> wanted")
+    if row["ll_bookid"]:
+        try:
+            get_backend_for_row(row["backend"]).reset_wanted(row["ll_bookid"], row["book_type"])
+        except Exception as e:
+            logger.warning(f"revive: backend reset failed for {row['id']}: {e}")
+
+
 def poll_once():
     conn_local = get_local_db()
     try:
         rows = conn_local.execute(
-            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend, requested_for, created_at FROM requests "
+            "SELECT id, ll_bookid, book_type, status, title, author, release_date, backend, requested_for, created_at, wanted_since FROM requests "
             "WHERE status NOT IN ('downloaded', 'unresolved', 'expired')"
         ).fetchall()
     finally:
@@ -1438,11 +1533,7 @@ def poll_once():
         # 1b. auto-expire anything still 'wanted' after STALE_REQUEST_EXPIRE_DAYS
         # with no source ever found - stops it being retried/displayed forever
         if final_status == "wanted" and expire_cutoff and r["created_at"]:
-            try:
-                created_dt = datetime.strptime(r["created_at"][:19], "%Y-%m-%dT%H:%M:%S")
-            except ValueError:
-                created_dt = None
-            if created_dt and created_dt < expire_cutoff:
+            if _expiry_due(r, expire_days):
                 status_updates.append(("expired", r["id"]))
                 final_status = "expired"
 

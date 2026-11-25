@@ -773,7 +773,7 @@ async function checkSourceStatus() {
     const status = await fetch(API + "/abb/source-status").then(r => r.json());
     const banner = document.getElementById("source-banner");
     if (status.status === "down") {
-      banner.textContent = "⚠ AudioBookBay looks unreachable right now - audiobook downloads may lag until it's back. LazyLibrarian will keep trying other sources in the meantime.";
+      banner.textContent = "⚠ AudioBookBay looks unreachable right now - audiobook downloads may lag until it's back. Other sources are still being searched in the meantime.";
       banner.style.display = "block";
     } else {
       banner.style.display = "none";
